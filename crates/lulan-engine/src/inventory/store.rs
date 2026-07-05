@@ -156,20 +156,7 @@ impl InventoryStore {
         unit_id: Uuid,
         span: SegmentSpan,
     ) -> Result<ClaimOutcome, StoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE seat_occupancy
-            SET occupied_mask = occupied_mask | $3
-            WHERE trip_id = $1 AND unit_id = $2 AND (occupied_mask & $3) = 0
-            "#,
-        )
-        .bind(trip_id)
-        .bind(unit_id)
-        .bind(span.mask() as i64)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 1 {
+        if claim_seat_exec(&self.pool, trip_id, unit_id, span).await? == 1 {
             return Ok(ClaimOutcome::Claimed);
         }
         self.disambiguate_seat(trip_id, unit_id).await
@@ -183,20 +170,7 @@ impl InventoryStore {
         unit_id: Uuid,
         span: SegmentSpan,
     ) -> Result<ClaimOutcome, StoreError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE seat_occupancy
-            SET occupied_mask = occupied_mask & ~($3::bigint)
-            WHERE trip_id = $1 AND unit_id = $2 AND (occupied_mask & $3) = $3
-            "#,
-        )
-        .bind(trip_id)
-        .bind(unit_id)
-        .bind(span.mask() as i64)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 1 {
+        if release_seat_exec(&self.pool, trip_id, unit_id, span).await? == 1 {
             return Ok(ClaimOutcome::Claimed);
         }
         self.disambiguate_seat(trip_id, unit_id).await
@@ -234,29 +208,7 @@ impl InventoryStore {
         if qty <= 0 {
             return Ok(ClaimOutcome::Conflict);
         }
-        // Postgres arrays are 1-based: span [from, to) is slice [from+1 : to].
-        let result = sqlx::query(
-            r#"
-            UPDATE pool_occupancy
-            SET remaining = (
-                SELECT array_agg(
-                    CASE WHEN idx BETWEEN $3 AND $4 THEN val - $5 ELSE val END
-                    ORDER BY idx)
-                FROM unnest(remaining) WITH ORDINALITY AS t(val, idx)
-            )
-            WHERE trip_id = $1 AND unit_id = $2
-              AND (SELECT min(val) FROM unnest(remaining[$3:$4]) AS val) >= $5
-            "#,
-        )
-        .bind(trip_id)
-        .bind(unit_id)
-        .bind(i32::from(span.from_index()) + 1)
-        .bind(i32::from(span.to_index()))
-        .bind(qty)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 1 {
+        if claim_pool_exec(&self.pool, trip_id, unit_id, span, qty).await? == 1 {
             return Ok(ClaimOutcome::Claimed);
         }
         let exists = sqlx::query_scalar::<_, i64>(
@@ -481,4 +433,117 @@ impl InventoryStore {
             })
             .collect()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Executor-generic claim primitives. The same guarded statements work on a
+// pool (standalone claims, Phase 2) or inside a transaction (order creation,
+// Phase 3) — one SQL truth for both paths. All return rows affected:
+// 1 = won, 0 = conflict or missing row.
+// ---------------------------------------------------------------------------
+
+pub async fn claim_seat_exec<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    trip_id: Uuid,
+    unit_id: Uuid,
+    span: SegmentSpan,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        UPDATE seat_occupancy
+        SET occupied_mask = occupied_mask | $3
+        WHERE trip_id = $1 AND unit_id = $2 AND (occupied_mask & $3) = 0
+        "#,
+    )
+    .bind(trip_id)
+    .bind(unit_id)
+    .bind(span.mask() as i64)
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+pub async fn release_seat_exec<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    trip_id: Uuid,
+    unit_id: Uuid,
+    span: SegmentSpan,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        UPDATE seat_occupancy
+        SET occupied_mask = occupied_mask & ~($3::bigint)
+        WHERE trip_id = $1 AND unit_id = $2 AND (occupied_mask & $3) = $3
+        "#,
+    )
+    .bind(trip_id)
+    .bind(unit_id)
+    .bind(span.mask() as i64)
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+pub async fn claim_pool_exec<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    trip_id: Uuid,
+    unit_id: Uuid,
+    span: SegmentSpan,
+    qty: i32,
+) -> Result<u64, sqlx::Error> {
+    // Postgres arrays are 1-based: span [from, to) is slice [from+1 : to].
+    let result = sqlx::query(
+        r#"
+        UPDATE pool_occupancy
+        SET remaining = (
+            SELECT array_agg(
+                CASE WHEN idx BETWEEN $3 AND $4 THEN val - $5 ELSE val END
+                ORDER BY idx)
+            FROM unnest(remaining) WITH ORDINALITY AS t(val, idx)
+        )
+        WHERE trip_id = $1 AND unit_id = $2
+          AND (SELECT min(val) FROM unnest(remaining[$3:$4]) AS val) >= $5
+        "#,
+    )
+    .bind(trip_id)
+    .bind(unit_id)
+    .bind(i32::from(span.from_index()) + 1)
+    .bind(i32::from(span.to_index()))
+    .bind(qty)
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Guarded on not exceeding the unit's capacity, so releasing something
+/// never claimed cannot inflate a pool.
+pub async fn release_pool_exec<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    trip_id: Uuid,
+    unit_id: Uuid,
+    span: SegmentSpan,
+    qty: i32,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        UPDATE pool_occupancy
+        SET remaining = (
+            SELECT array_agg(
+                CASE WHEN idx BETWEEN $3 AND $4 THEN val + $5 ELSE val END
+                ORDER BY idx)
+            FROM unnest(remaining) WITH ORDINALITY AS t(val, idx)
+        )
+        WHERE trip_id = $1 AND unit_id = $2
+          AND (SELECT max(val) FROM unnest(remaining[$3:$4]) AS val) + $5
+              <= (SELECT pool_capacity FROM capacity_units WHERE id = $2)
+        "#,
+    )
+    .bind(trip_id)
+    .bind(unit_id)
+    .bind(i32::from(span.from_index()) + 1)
+    .bind(i32::from(span.to_index()))
+    .bind(qty)
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
 }

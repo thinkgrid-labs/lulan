@@ -7,5 +7,6 @@ mod store;
 pub use holds::{Hold, HoldError, HoldStore};
 pub use store::{
     ClaimOutcome, ClaimTarget, FareAvailability, InventoryStore, PoolAvailability,
-    SeatAvailability, StoreError, TripAvailability, TripSummary,
+    SeatAvailability, StoreError, TripAvailability, TripSummary, claim_pool_exec,
+    claim_seat_exec, release_pool_exec, release_seat_exec,
 };

@@ -8,4 +8,7 @@
 //! - `ticket` — ticket issuance and signing (Phase 5)
 
 pub mod domain;
+pub mod events;
 pub mod inventory;
+pub mod orders;
+pub mod payments;

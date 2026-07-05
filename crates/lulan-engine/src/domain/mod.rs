@@ -3,6 +3,7 @@
 mod capacity;
 mod ids;
 mod network;
+mod order;
 mod pool;
 mod segment;
 
@@ -12,5 +13,6 @@ pub use ids::{
     TripPatternId,
 };
 pub use network::{Location, Route, Trip, TripPattern};
+pub use order::{OrderEventType, OrderStatus, TransitionError, apply};
 pub use pool::{PoolError, PoolOccupancy};
 pub use segment::{MAX_SEGMENTS, SegmentSpan, SpanError};
