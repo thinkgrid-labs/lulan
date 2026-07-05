@@ -38,6 +38,10 @@ pub struct FareRuleSet {
     /// (e.g. PH), so this is a first-class fare input.
     #[serde(default)]
     pub passenger_type_discounts: BTreeMap<String, i64>,
+    /// Discount applied to every item of a round-trip itinerary, basis
+    /// points.
+    #[serde(default)]
+    pub round_trip_discount_bp: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +79,18 @@ pub struct RuleInput {
     /// `senior`, `pwd`, `infant`); None for order-level pool items.
     #[serde(default)]
     pub passenger_type: Option<String>,
+    /// Journeys in the itinerary this item belongs to (1 = one-way).
+    /// Host-derived so modules stay deterministic.
+    #[serde(default = "default_journey_count")]
+    pub journey_count: u32,
+    /// True when the itinerary is an out-and-back pairing (host-derived:
+    /// exactly two journeys, the second reversing the first's O&D).
+    #[serde(default)]
+    pub is_round_trip: bool,
+}
+
+fn default_journey_count() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -185,6 +201,13 @@ pub fn evaluate(rules: &FareRuleSet, input: &RuleInput) -> Result<Quote, EvalErr
         });
     }
 
+    if input.is_round_trip && rules.round_trip_discount_bp != 0 {
+        adjustments.push(Adjustment {
+            label: "round_trip".into(),
+            amount_minor: -bp(base, rules.round_trip_discount_bp),
+        });
+    }
+
     if let Some(code) = &input.promo_code
         && let Some(discount_bp) = rules.promos.get(code)
     {
@@ -245,6 +268,7 @@ mod tests {
                 ("pwd".into(), 2_000),
                 ("child".into(), 5_000),
             ]),
+            round_trip_discount_bp: 1_000,
         }
     }
 
@@ -258,6 +282,8 @@ mod tests {
             occupancy_bp: 0,
             promo_code: None,
             passenger_type: None,
+            journey_count: 1,
+            is_round_trip: false,
         }
     }
 
@@ -325,6 +351,22 @@ mod tests {
         let q = evaluate(&demo_rules(), &i).unwrap();
         assert_eq!(q.total_minor, 45_000);
         assert!(q.adjustments.is_empty());
+    }
+
+    #[test]
+    fn round_trip_discount_applies_only_to_round_trips() {
+        let mut i = input("economy");
+        i.journey_count = 2;
+        i.is_round_trip = true;
+        let q = evaluate(&demo_rules(), &i).unwrap();
+        // 45000 - 10% = 40500
+        assert_eq!(q.total_minor, 40_500);
+        assert_eq!(q.adjustments[0].label, "round_trip");
+
+        // Two journeys that don't pair (multi-city) get no discount.
+        i.is_round_trip = false;
+        let q = evaluate(&demo_rules(), &i).unwrap();
+        assert_eq!(q.total_minor, 45_000);
     }
 
     #[test]

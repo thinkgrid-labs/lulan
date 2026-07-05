@@ -80,7 +80,7 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     lulan_api::seed::seed(&pool).await.unwrap();
 
     let trip_id: Uuid =
-        sqlx::query("SELECT id FROM trips ORDER BY departs_at DESC LIMIT 1 OFFSET 1")
+        sqlx::query("SELECT t.id FROM trips t JOIN routes r ON r.id = t.route_id WHERE r.code = 'BTG-CEB' ORDER BY t.departs_at DESC LIMIT 1 OFFSET 1")
             .fetch_one(&pool)
             .await
             .unwrap()

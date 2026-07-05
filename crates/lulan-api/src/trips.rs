@@ -14,14 +14,20 @@ pub struct SearchParams {
     destination: String,
     /// Service date, `YYYY-MM-DD`.
     date: NaiveDate,
+    /// Round-trip convenience: also search the reverse direction on this
+    /// date and return candidates as `return_trips`.
+    #[serde(default)]
+    return_date: Option<NaiveDate>,
 }
 
 #[derive(Serialize)]
 pub struct SearchResponse {
     trips: Vec<TripSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    return_trips: Option<Vec<TripSummary>>,
 }
 
-/// GET /v1/trips/search?origin=BTG&destination=CEB&date=2026-07-06
+/// GET /v1/trips/search?origin=BTG&destination=CEB&date=2026-07-06[&return_date=…]
 pub async fn search(
     State(state): State<AppState>,
     Query(params): Query<SearchParams>,
@@ -30,7 +36,18 @@ pub async fn search(
     let trips = store
         .search_trips(&params.origin, &params.destination, params.date)
         .await?;
-    Ok(Json(SearchResponse { trips }))
+    let return_trips = match params.return_date {
+        Some(date) => Some(
+            store
+                .search_trips(&params.destination, &params.origin, date)
+                .await?,
+        ),
+        None => None,
+    };
+    Ok(Json(SearchResponse {
+        trips,
+        return_trips,
+    }))
 }
 
 #[derive(Deserialize)]

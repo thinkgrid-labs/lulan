@@ -220,17 +220,15 @@ impl TicketStore {
     ) -> Result<Vec<IssuedTicket>, TicketError> {
         let mut tx = self.pool.begin().await?;
 
-        let Some(order) =
-            sqlx::query("SELECT status, trip_id FROM orders WHERE id = $1 FOR UPDATE")
-                .bind(order_id)
-                .fetch_optional(&mut *tx)
-                .await?
+        let Some(order) = sqlx::query("SELECT status FROM orders WHERE id = $1 FOR UPDATE")
+            .bind(order_id)
+            .fetch_optional(&mut *tx)
+            .await?
         else {
             return Err(TicketError::OrderNotFound);
         };
         let status = OrderStatus::parse(order.get::<String, _>("status").as_str())
             .expect("orders.status CHECK guarantees a known value");
-        let trip_id: Uuid = order.try_get("trip_id")?;
 
         if status == OrderStatus::Ticketed || status == OrderStatus::Boarded {
             drop(tx);
@@ -240,23 +238,19 @@ impl TicketStore {
             return Err(TicketError::NotPaid(status.as_str()));
         }
 
-        let departs_at: DateTime<Utc> =
-            sqlx::query_scalar("SELECT departs_at FROM trips WHERE id = $1")
-                .bind(trip_id)
-                .fetch_one(&mut *tx)
-                .await?;
-        let exp = (departs_at + Duration::hours(VALIDITY_AFTER_DEPARTURE_HOURS)).timestamp();
-
-        // One ticket per seat item, tied to its passenger.
+        // One ticket per seat item, tied to its passenger; itineraries
+        // yield one ticket per passenger PER LEG, each valid against its
+        // own trip's departure.
         let seat_items = sqlx::query(
-            "SELECT oi.unit_id, oi.unit_code, oi.from_index, oi.to_index,
+            "SELECT oi.trip_id, oi.unit_id, oi.unit_code, oi.from_index, oi.to_index,
                     p.id AS passenger_id, p.full_name,
-                    cu.fare_class
+                    cu.fare_class, t.departs_at
              FROM order_items oi
              JOIN passengers p ON p.id = oi.passenger_id
              JOIN capacity_units cu ON cu.id = oi.unit_id
+             JOIN trips t ON t.id = oi.trip_id
              WHERE oi.order_id = $1 AND oi.kind = 'seat'
-             ORDER BY oi.unit_code",
+             ORDER BY t.departs_at, oi.unit_code",
         )
         .bind(order_id)
         .fetch_all(&mut *tx)
@@ -269,6 +263,9 @@ impl TicketStore {
             let passenger_id: Uuid = row.try_get("passenger_id")?;
             let passenger_name: String = row.try_get("full_name")?;
             let unit_code: String = row.try_get("unit_code")?;
+            let trip_id: Uuid = row.try_get("trip_id")?;
+            let departs_at: DateTime<Utc> = row.try_get("departs_at")?;
+            let exp = (departs_at + Duration::hours(VALIDITY_AFTER_DEPARTURE_HOURS)).timestamp();
             let claims = TicketClaims {
                 v: 1,
                 tid: ticket_id,
@@ -300,6 +297,7 @@ impl TicketStore {
             issued_json.push(json!({
                 "ticket_id": ticket_id,
                 "passenger_id": passenger_id,
+                "trip_id": trip_id,
                 "unit_code": unit_code,
             }));
             issued.push(IssuedTicket {

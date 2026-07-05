@@ -38,6 +38,8 @@ export interface TripSearchParams {
   destination: string;
   /** ISO date (YYYY-MM-DD). */
   date: string;
+  /** Round-trip convenience: also search the reverse direction on this date. */
+  return_date?: string;
 }
 
 export interface FareClassAvailability {
@@ -92,15 +94,23 @@ export interface Adjustment {
 }
 
 export interface QuotedItem extends Required<Pick<QuoteItemRequest, "unit_code" | "origin" | "destination" | "quantity">> {
+  trip_id: string;
   passenger_type: PassengerType | null;
   base_minor: number;
   total_minor: number;
   adjustments: Adjustment[];
 }
 
-export interface Quote {
+export interface Journey<Item> {
   trip_id: string;
+  items: Item[];
+}
+
+export interface Quote {
   currency: string;
+  /** 1 = one-way; 2 with reversed O&D = round-trip; otherwise multi-city. */
+  journey_count: number;
+  is_round_trip: boolean;
   total_minor: number;
   expires_at: string;
   /** Locks these prices at checkout for ~5 minutes. */
@@ -120,17 +130,24 @@ export interface OrderItemRequest {
   hold_id?: string;
 }
 
+/**
+ * An itinerary: either `journeys` (round-trip / multi-city) or the
+ * single-trip shape `trip_id` + `items` — sugar for a 1-journey itinerary.
+ * Trip type is derived: 2 journeys with reversed O&D = round-trip.
+ */
 export interface CreateOrderRequest {
-  trip_id: string;
+  trip_id?: string;
+  items?: OrderItemRequest[];
+  journeys?: Journey<OrderItemRequest>[];
   passengers: Passenger[];
   /** Email or phone. Required unless authenticated with a customer JWT. */
   guest_contact?: string;
   quote_token?: string;
   promo_code?: string;
-  items: OrderItemRequest[];
 }
 
 export interface OrderItem {
+  trip_id: string;
   unit_code: string;
   kind: "seat" | "pool";
   from_index: number;
@@ -149,7 +166,8 @@ export interface PassengerRecord {
 
 export interface Order {
   order_id: string;
-  trip_id: string;
+  /** Distinct trips this itinerary touches, in item order. */
+  trip_ids: string[];
   passenger_name: string;
   status: OrderStatus;
   total_minor: number;
@@ -213,7 +231,7 @@ export interface ScanOutcome {
 
 export interface CustomerOrderSummary {
   order_id: string;
-  trip_id: string;
+  trip_ids: string[];
   status: string;
   total_minor: number;
   currency: string;
@@ -310,8 +328,13 @@ export class LulanClient {
 
   // ---- trips ----------------------------------------------------------
 
-  searchTrips(params: TripSearchParams, options?: RequestOptions): Promise<{ trips: TripHit[] }> {
-    const query = new URLSearchParams(params as unknown as Record<string, string>);
+  searchTrips(
+    params: TripSearchParams,
+    options?: RequestOptions,
+  ): Promise<{ trips: TripHit[]; return_trips?: TripHit[] }> {
+    const query = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined)),
+    );
     return this.request("GET", `/v1/trips/search?${query}`, undefined, options);
   }
 
@@ -341,7 +364,9 @@ export class LulanClient {
   // ---- quotes & orders -------------------------------------------------
 
   createQuote(
-    request: { trip_id: string; items: QuoteItemRequest[]; promo_code?: string },
+    request:
+      | { trip_id: string; items: QuoteItemRequest[]; promo_code?: string }
+      | { journeys: Journey<QuoteItemRequest>[]; promo_code?: string },
     options?: RequestOptions,
   ): Promise<Quote> {
     return this.request("POST", "/v1/quotes", request, options);

@@ -43,6 +43,7 @@ async fn seed_fare_rules(pool: &PgPool) -> anyhow::Result<()> {
             {"min_days": 14, "discount_bp": 2_000},
         ],
         "promos": {"BAGONGBYAHE": 500},
+        "round_trip_discount_bp": 1_000,
         "passenger_type_discounts": {
             "senior": 2_000,
             "pwd": 2_000,
@@ -81,7 +82,8 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<()> {
             .fetch_one(pool)
             .await?;
     if already > 0 {
-        println!("demo network already seeded, nothing to do");
+        println!("demo network already seeded");
+        seed_return_route(pool).await?;
         return Ok(());
     }
 
@@ -226,7 +228,103 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<()> {
 
     tx.commit().await?;
     println!(
-        "seeded demo network: BTG→CTC→ILO→CEB, 52 seats + 2 pools, {DAYS} daily sailings (first trip {first_trip})"
+        "seeded demo network: BTG→CTC→ILO→CEB, 52 seats + 2 pools, {DAYS} daily departures (first trip {first_trip})"
     );
+    seed_return_route(pool).await?;
+    Ok(())
+}
+
+/// The return direction (CEB→ILO→CTC→BTG, 12:00 UTC daily) — what makes
+/// round-trip itineraries possible (Phase 6.5). Idempotent; also upgrades
+/// databases seeded before the return route existed.
+async fn seed_return_route(pool: &PgPool) -> anyhow::Result<()> {
+    let already =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM routes WHERE code = 'CEB-BTG'")
+            .fetch_one(pool)
+            .await?;
+    if already > 0 {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+
+    let resource_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM resources WHERE code = 'MV-LULAN-1'")
+            .fetch_one(&mut *tx)
+            .await
+            .context("outbound network must be seeded first")?;
+
+    let route_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO routes (id, code, name) VALUES ($1, 'CEB-BTG', 'Cebu – Batangas')")
+        .bind(route_id)
+        .execute(&mut *tx)
+        .await?;
+    for (index, (code, _)) in STOPS.iter().rev().enumerate() {
+        sqlx::query(
+            "INSERT INTO route_stops (route_id, stop_index, location_id)
+             SELECT $1, $2, id FROM locations WHERE code = $3",
+        )
+        .bind(route_id)
+        .bind(index as i16)
+        .bind(code)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let units: Vec<(Uuid, Option<i32>)> =
+        sqlx::query_as("SELECT id, pool_capacity FROM capacity_units WHERE resource_id = $1")
+            .bind(resource_id)
+            .fetch_all(&mut *tx)
+            .await?;
+
+    let today = Utc::now().date_naive();
+    for day in 0..DAYS {
+        let service_date = today + Duration::days(day);
+        let departs_at = service_date
+            .and_time(NaiveTime::from_hms_opt(12, 0, 0).context("valid time")?)
+            .and_utc();
+        let trip_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO trips (id, route_id, resource_id, service_date, departs_at, segment_count)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(trip_id)
+        .bind(route_id)
+        .bind(resource_id)
+        .bind(service_date)
+        .bind(departs_at)
+        .bind(SEGMENTS)
+        .execute(&mut *tx)
+        .await?;
+
+        for (unit_id, pool_capacity) in &units {
+            match pool_capacity {
+                None => {
+                    sqlx::query(
+                        "INSERT INTO seat_occupancy (trip_id, unit_id, occupied_mask) VALUES ($1, $2, 0)",
+                    )
+                    .bind(trip_id)
+                    .bind(unit_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                Some(capacity) => {
+                    sqlx::query(
+                        "INSERT INTO pool_occupancy (trip_id, unit_id, remaining)
+                         VALUES ($1, $2, array_fill($3::int, ARRAY[$4::int]))",
+                    )
+                    .bind(trip_id)
+                    .bind(unit_id)
+                    .bind(capacity)
+                    .bind(i32::from(SEGMENTS))
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+    }
+
+    tx.commit().await?;
+    println!("seeded return route: CEB→ILO→CTC→BTG, {DAYS} daily departures");
     Ok(())
 }

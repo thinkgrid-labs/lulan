@@ -41,6 +41,9 @@ pub struct PassengerRecord {
 
 #[derive(Debug, Clone)]
 pub struct NewOrderItem {
+    /// The departure this item claims capacity on. Items of one order may
+    /// span multiple trips — that IS the itinerary (Phase 6.5).
+    pub trip_id: Uuid,
     pub unit_code: String,
     pub origin: String,
     pub destination: String,
@@ -56,6 +59,7 @@ pub struct NewOrderItem {
 
 #[derive(Debug, Serialize)]
 pub struct OrderItem {
+    pub trip_id: Uuid,
     pub unit_code: String,
     pub kind: String,
     pub from_index: u8,
@@ -68,7 +72,8 @@ pub struct OrderItem {
 #[derive(Debug, Serialize)]
 pub struct OrderRecord {
     pub order_id: Uuid,
-    pub trip_id: Uuid,
+    /// Distinct trips this itinerary touches, in item order.
+    pub trip_ids: Vec<Uuid>,
     /// Lead passenger (passengers[0]) — kept for booking lookup.
     pub passenger_name: String,
     pub status: OrderStatus,
@@ -129,12 +134,12 @@ impl OrderStore {
         Self { pool, inventory }
     }
 
-    /// Create an order: passengers + claims + order row +
-    /// OrderCreated/InventoryLocked events, atomically. Any claim conflict
-    /// rolls back everything.
+    /// Create an order (= one itinerary, possibly spanning several
+    /// trips): passengers + claims + order row + OrderCreated/
+    /// InventoryLocked events, atomically. A claim conflict on ANY leg
+    /// rolls back every claim on every leg.
     pub async fn create(
         &self,
-        trip_id: Uuid,
         passengers: &[NewPassenger],
         items: &[NewOrderItem],
     ) -> Result<CreateOutcome, StoreError> {
@@ -152,13 +157,18 @@ impl OrderStore {
         for item in items {
             match self
                 .inventory
-                .resolve_target(trip_id, &item.unit_code, &item.origin, &item.destination)
+                .resolve_target(
+                    item.trip_id,
+                    &item.unit_code,
+                    &item.origin,
+                    &item.destination,
+                )
                 .await?
             {
                 Some(target) => targets.push(target),
                 None => {
                     return Ok(CreateOutcome::NotFound {
-                        what: format!("trip {trip_id} with unit {:?}", item.unit_code),
+                        what: format!("trip {} with unit {:?}", item.trip_id, item.unit_code),
                     });
                 }
             }
@@ -205,11 +215,10 @@ impl OrderStore {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query(
-            "INSERT INTO orders (id, trip_id, passenger_name, status, total_minor, currency, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO orders (id, passenger_name, status, total_minor, currency, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(order_id)
-        .bind(trip_id)
         .bind(&passengers[0].full_name)
         .bind(OrderStatus::Locked.as_str())
         .bind(total_minor)
@@ -243,14 +252,16 @@ impl OrderStore {
         let mut recorded_items = Vec::with_capacity(items.len());
         for ((item, target), slot) in items.iter().zip(&targets).zip(&passenger_slots) {
             let rows = match target.kind.as_str() {
-                "seat" => claim_seat_exec(&mut *tx, trip_id, target.unit_id, target.span).await?,
+                "seat" => {
+                    claim_seat_exec(&mut *tx, item.trip_id, target.unit_id, target.span).await?
+                }
                 _ => {
                     if item.quantity <= 0 {
                         0
                     } else {
                         claim_pool_exec(
                             &mut *tx,
-                            trip_id,
+                            item.trip_id,
                             target.unit_id,
                             target.span,
                             item.quantity,
@@ -267,10 +278,11 @@ impl OrderStore {
             }
             let passenger_id = slot.map(|index| passenger_records[index].id);
             sqlx::query(
-                "INSERT INTO order_items (order_id, unit_id, unit_code, kind, from_index, to_index, quantity, price_minor, passenger_id)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                "INSERT INTO order_items (order_id, trip_id, unit_id, unit_code, kind, from_index, to_index, quantity, price_minor, passenger_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             )
             .bind(order_id)
+            .bind(item.trip_id)
             .bind(target.unit_id)
             .bind(&item.unit_code)
             .bind(&target.kind)
@@ -282,6 +294,7 @@ impl OrderStore {
             .execute(&mut *tx)
             .await?;
             recorded_items.push(OrderItem {
+                trip_id: item.trip_id,
                 unit_code: item.unit_code.clone(),
                 kind: target.kind.clone(),
                 from_index: target.span.from_index(),
@@ -296,6 +309,7 @@ impl OrderStore {
             .iter()
             .map(|i| {
                 json!({
+                    "trip_id": i.trip_id,
                     "unit_code": i.unit_code, "kind": i.kind,
                     "from_index": i.from_index, "to_index": i.to_index,
                     "quantity": i.quantity, "price_minor": i.price_minor,
@@ -318,7 +332,7 @@ impl OrderStore {
             order_id,
             OrderEventType::OrderCreated.as_str(),
             json!({
-                "trip_id": trip_id,
+                "trip_ids": distinct_trips(&recorded_items),
                 "passengers": passengers_json,
                 "total_minor": total_minor,
                 "currency": CURRENCY,
@@ -338,7 +352,7 @@ impl OrderStore {
 
         Ok(CreateOutcome::Created(OrderRecord {
             order_id,
-            trip_id,
+            trip_ids: distinct_trips(&recorded_items),
             passenger_name: passenger_records[0].full_name.clone(),
             status: OrderStatus::Locked,
             total_minor,
@@ -507,7 +521,7 @@ impl OrderStore {
     /// Fetch the read model for one order.
     pub async fn get(&self, order_id: Uuid) -> Result<Option<OrderRecord>, StoreError> {
         let Some(row) = sqlx::query(
-            "SELECT trip_id, passenger_name, status, total_minor, currency,
+            "SELECT passenger_name, status, total_minor, currency,
                     payment_intent_id, expires_at
              FROM orders WHERE id = $1",
         )
@@ -541,16 +555,31 @@ impl OrderStore {
             .collect::<Result<Vec<_>, sqlx::Error>>()?;
 
         let item_rows = sqlx::query(
-            "SELECT unit_code, kind, from_index, to_index, quantity, price_minor, passenger_id
+            "SELECT trip_id, unit_code, kind, from_index, to_index, quantity, price_minor, passenger_id
              FROM order_items WHERE order_id = $1 ORDER BY unit_code",
         )
         .bind(order_id)
         .fetch_all(&self.pool)
         .await?;
+        let items = item_rows
+            .into_iter()
+            .map(|r| {
+                Ok(OrderItem {
+                    trip_id: r.try_get("trip_id")?,
+                    unit_code: r.try_get("unit_code")?,
+                    kind: r.try_get("kind")?,
+                    from_index: r.try_get::<i16, _>("from_index")? as u8,
+                    to_index: r.try_get::<i16, _>("to_index")? as u8,
+                    quantity: r.try_get("quantity")?,
+                    price_minor: r.try_get("price_minor")?,
+                    passenger_id: r.try_get("passenger_id")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
 
         Ok(Some(OrderRecord {
             order_id,
-            trip_id: row.try_get("trip_id")?,
+            trip_ids: distinct_trips(&items),
             passenger_name: row.try_get("passenger_name")?,
             status: OrderStatus::parse(row.get::<String, _>("status").as_str())
                 .expect("orders.status CHECK constraint guarantees a known value"),
@@ -559,20 +588,7 @@ impl OrderStore {
             payment_intent_id: row.try_get("payment_intent_id")?,
             expires_at: row.try_get("expires_at")?,
             passengers,
-            items: item_rows
-                .into_iter()
-                .map(|r| {
-                    Ok(OrderItem {
-                        unit_code: r.try_get("unit_code")?,
-                        kind: r.try_get("kind")?,
-                        from_index: r.try_get::<i16, _>("from_index")? as u8,
-                        to_index: r.try_get::<i16, _>("to_index")? as u8,
-                        quantity: r.try_get("quantity")?,
-                        price_minor: r.try_get("price_minor")?,
-                        passenger_id: r.try_get("passenger_id")?,
-                    })
-                })
-                .collect::<Result<Vec<_>, sqlx::Error>>()?,
+            items,
         }))
     }
 
@@ -598,6 +614,17 @@ impl OrderStore {
     }
 }
 
+/// Distinct trips in item order — the itinerary's legs.
+fn distinct_trips(items: &[OrderItem]) -> Vec<Uuid> {
+    let mut trips = Vec::new();
+    for item in items {
+        if !trips.contains(&item.trip_id) {
+            trips.push(item.trip_id);
+        }
+    }
+    trips
+}
+
 /// Release every claim held by an order (cancel/expire paths). Runs inside
 /// the caller's transaction, guarded exactly like claims.
 async fn release_order_items(
@@ -605,9 +632,8 @@ async fn release_order_items(
     order_id: Uuid,
 ) -> Result<(), StoreError> {
     let items = sqlx::query(
-        "SELECT oi.unit_id, oi.kind, oi.from_index, oi.to_index, oi.quantity, o.trip_id
-         FROM order_items oi JOIN orders o ON o.id = oi.order_id
-         WHERE oi.order_id = $1",
+        "SELECT unit_id, kind, from_index, to_index, quantity, trip_id
+         FROM order_items WHERE order_id = $1",
     )
     .bind(order_id)
     .fetch_all(&mut **tx)

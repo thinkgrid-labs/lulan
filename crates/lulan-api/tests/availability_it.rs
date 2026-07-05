@@ -51,7 +51,7 @@ async fn availability_answers_the_prd_example_over_http() {
     // Restore that fixture explicitly so this test is self-healing even if
     // another run has touched the trip.
     let row =
-        sqlx::query("SELECT id::text, service_date::text FROM trips ORDER BY departs_at LIMIT 1")
+        sqlx::query("SELECT t.id::text, t.service_date::text FROM trips t JOIN routes r ON r.id = t.route_id WHERE r.code = 'BTG-CEB' ORDER BY t.departs_at LIMIT 1")
             .fetch_one(&pool)
             .await
             .unwrap();

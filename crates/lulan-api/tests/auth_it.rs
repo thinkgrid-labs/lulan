@@ -123,22 +123,32 @@ async fn auth_identity_idempotency_and_rate_limits() {
         .unwrap();
 
     let trip_id: Uuid =
-        sqlx::query("SELECT id FROM trips ORDER BY departs_at DESC LIMIT 1 OFFSET 2")
+        sqlx::query("SELECT t.id FROM trips t JOIN routes r ON r.id = t.route_id WHERE r.code = 'BTG-CEB' ORDER BY t.departs_at DESC LIMIT 1 OFFSET 2")
             .fetch_one(&pool)
             .await
             .unwrap()
             .get(0);
+    let stale: Vec<Uuid> =
+        sqlx::query_scalar("SELECT DISTINCT order_id FROM order_items WHERE trip_id = $1")
+            .bind(trip_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     for sql in [
-        "DELETE FROM scan_events WHERE ticket_id IN (SELECT id FROM tickets WHERE trip_id = $1)",
-        "DELETE FROM tickets WHERE trip_id = $1",
-        "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
-        "DELETE FROM passengers WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
+        "DELETE FROM scan_events WHERE ticket_id IN (SELECT id FROM tickets WHERE order_id = ANY($1))",
+        "DELETE FROM tickets WHERE order_id = ANY($1)",
+        "DELETE FROM idempotency_keys WHERE order_id = ANY($1)",
+        "DELETE FROM order_items WHERE order_id = ANY($1)",
+        "DELETE FROM passengers WHERE order_id = ANY($1)",
+        "DELETE FROM orders WHERE id = ANY($1)",
+    ] {
+        sqlx::query(sql).bind(&stale).execute(&pool).await.unwrap();
+    }
+    for sql in [
         "DELETE FROM idempotency_keys WHERE key LIKE 'auth-it-%'",
-        "DELETE FROM idempotency_keys WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
-        "DELETE FROM orders WHERE trip_id = $1",
         "DELETE FROM customers WHERE issuer = 'https://idp.test'",
     ] {
-        sqlx::query(sql).bind(trip_id).execute(&pool).await.unwrap();
+        sqlx::query(sql).execute(&pool).await.unwrap();
     }
     sqlx::query("UPDATE seat_occupancy SET occupied_mask = 0 WHERE trip_id = $1")
         .bind(trip_id)
@@ -419,8 +429,7 @@ async fn auth_identity_idempotency_and_rate_limits() {
     );
     let twelve_c_orders: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM order_items oi
-         JOIN orders o ON o.id = oi.order_id
-         WHERE o.trip_id = $1 AND oi.unit_code = '12C'",
+         WHERE oi.trip_id = $1 AND oi.unit_code = '12C'",
     )
     .bind(trip_id)
     .fetch_one(&pool)

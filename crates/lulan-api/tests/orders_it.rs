@@ -29,7 +29,7 @@ async fn setup(offset: i64) -> Option<(PgPool, Uuid, axum::Router)> {
     lulan_api::seed::seed(&pool).await.expect("seed");
 
     let trip_id: Uuid =
-        sqlx::query("SELECT id FROM trips ORDER BY departs_at DESC LIMIT 1 OFFSET $1")
+        sqlx::query("SELECT t.id FROM trips t JOIN routes r ON r.id = t.route_id WHERE r.code = 'BTG-CEB' ORDER BY t.departs_at DESC LIMIT 1 OFFSET $1")
             .bind(offset)
             .fetch_one(&pool)
             .await
@@ -37,15 +37,23 @@ async fn setup(offset: i64) -> Option<(PgPool, Uuid, axum::Router)> {
             .get(0);
     // Idempotent fixture: clear this trip's orders and everything hanging
     // off them (scan events → tickets → items → passengers → orders).
+    // Orders are itineraries now: find every order touching this trip and
+    // remove it wholesale (all legs), children first.
+    let stale: Vec<Uuid> =
+        sqlx::query_scalar("SELECT DISTINCT order_id FROM order_items WHERE trip_id = $1")
+            .bind(trip_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     for sql in [
-        "DELETE FROM scan_events WHERE ticket_id IN (SELECT id FROM tickets WHERE trip_id = $1)",
-        "DELETE FROM tickets WHERE trip_id = $1",
-        "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
-        "DELETE FROM passengers WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
-        "DELETE FROM idempotency_keys WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
-        "DELETE FROM orders WHERE trip_id = $1",
+        "DELETE FROM scan_events WHERE ticket_id IN (SELECT id FROM tickets WHERE order_id = ANY($1))",
+        "DELETE FROM tickets WHERE order_id = ANY($1)",
+        "DELETE FROM idempotency_keys WHERE order_id = ANY($1)",
+        "DELETE FROM order_items WHERE order_id = ANY($1)",
+        "DELETE FROM passengers WHERE order_id = ANY($1)",
+        "DELETE FROM orders WHERE id = ANY($1)",
     ] {
-        sqlx::query(sql).bind(trip_id).execute(&pool).await.unwrap();
+        sqlx::query(sql).bind(&stale).execute(&pool).await.unwrap();
     }
     sqlx::query("UPDATE seat_occupancy SET occupied_mask = 0 WHERE trip_id = $1")
         .bind(trip_id)
@@ -294,11 +302,12 @@ async fn conflicting_order_rolls_back_completely() {
     assert_eq!(status, StatusCode::CREATED);
 
     // Second order wants 6B (free) AND 6A (taken): must fail atomically.
-    let orders_before: i64 = sqlx::query_scalar("SELECT count(*) FROM orders WHERE trip_id = $1")
-        .bind(trip_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let orders_before: i64 =
+        sqlx::query_scalar("SELECT count(DISTINCT order_id) FROM order_items WHERE trip_id = $1")
+            .bind(trip_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     let (status, body) = request(
         &app,
         "POST",
@@ -315,11 +324,12 @@ async fn conflicting_order_rolls_back_completely() {
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
 
     // Nothing was written: no order row, 6B still available.
-    let orders_after: i64 = sqlx::query_scalar("SELECT count(*) FROM orders WHERE trip_id = $1")
-        .bind(trip_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let orders_after: i64 =
+        sqlx::query_scalar("SELECT count(DISTINCT order_id) FROM order_items WHERE trip_id = $1")
+            .bind(trip_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(orders_after, orders_before);
     let (_, avail) = request(
         &app,

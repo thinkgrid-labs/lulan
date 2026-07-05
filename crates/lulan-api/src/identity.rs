@@ -175,7 +175,7 @@ impl axum::extract::FromRequestParts<AppState> for CustomerAuth {
 #[derive(Serialize)]
 pub struct CustomerOrder {
     order_id: Uuid,
-    trip_id: Uuid,
+    trip_ids: Vec<Uuid>,
     status: String,
     total_minor: i64,
     currency: String,
@@ -192,7 +192,9 @@ pub async fn my_orders(
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
     let rows = sqlx::query(
-        "SELECT id, trip_id, status, total_minor, currency, created_at
+        "SELECT id, status, total_minor, currency, created_at,
+                (SELECT coalesce(array_agg(DISTINCT oi.trip_id), '{}')
+                 FROM order_items oi WHERE oi.order_id = orders.id) AS trip_ids
          FROM orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 100",
     )
     .bind(customer.customer_id)
@@ -204,7 +206,7 @@ pub async fn my_orders(
         .map(|row| {
             Ok(CustomerOrder {
                 order_id: row.try_get("id")?,
-                trip_id: row.try_get("trip_id")?,
+                trip_ids: row.try_get("trip_ids")?,
                 status: row.try_get("status")?,
                 total_minor: row.try_get("total_minor")?,
                 currency: row.try_get("currency")?,

@@ -113,7 +113,7 @@ async fn webhooks_deliver_signed_filtered_events_with_retries() {
         .await
         .unwrap();
     let trip_id: Uuid =
-        sqlx::query("SELECT id FROM trips ORDER BY departs_at DESC LIMIT 1 OFFSET 2")
+        sqlx::query("SELECT t.id FROM trips t JOIN routes r ON r.id = t.route_id WHERE r.code = 'BTG-CEB' ORDER BY t.departs_at DESC LIMIT 1 OFFSET 2")
             .fetch_one(&pool)
             .await
             .unwrap()

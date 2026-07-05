@@ -53,22 +53,30 @@ async fn quotes_price_orders_and_reject_tampering() {
     lulan_api::seed::seed(&pool).await.unwrap();
 
     let trip_id: Uuid =
-        sqlx::query("SELECT id FROM trips ORDER BY departs_at DESC LIMIT 1 OFFSET 2")
+        sqlx::query("SELECT t.id FROM trips t JOIN routes r ON r.id = t.route_id WHERE r.code = 'BTG-CEB' ORDER BY t.departs_at DESC LIMIT 1 OFFSET 2")
             .fetch_one(&pool)
             .await
             .unwrap()
             .get(0);
     // Idempotent fixture: clear this trip's orders and everything hanging
     // off them (scan events → tickets → items → passengers → orders).
+    // Orders are itineraries now: find every order touching this trip and
+    // remove it wholesale (all legs), children first.
+    let stale: Vec<Uuid> =
+        sqlx::query_scalar("SELECT DISTINCT order_id FROM order_items WHERE trip_id = $1")
+            .bind(trip_id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
     for sql in [
-        "DELETE FROM scan_events WHERE ticket_id IN (SELECT id FROM tickets WHERE trip_id = $1)",
-        "DELETE FROM tickets WHERE trip_id = $1",
-        "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
-        "DELETE FROM passengers WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
-        "DELETE FROM idempotency_keys WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
-        "DELETE FROM orders WHERE trip_id = $1",
+        "DELETE FROM scan_events WHERE ticket_id IN (SELECT id FROM tickets WHERE order_id = ANY($1))",
+        "DELETE FROM tickets WHERE order_id = ANY($1)",
+        "DELETE FROM idempotency_keys WHERE order_id = ANY($1)",
+        "DELETE FROM order_items WHERE order_id = ANY($1)",
+        "DELETE FROM passengers WHERE order_id = ANY($1)",
+        "DELETE FROM orders WHERE id = ANY($1)",
     ] {
-        sqlx::query(sql).bind(trip_id).execute(&pool).await.unwrap();
+        sqlx::query(sql).bind(&stale).execute(&pool).await.unwrap();
     }
     sqlx::query("UPDATE seat_occupancy SET occupied_mask = 0 WHERE trip_id = $1")
         .bind(trip_id)

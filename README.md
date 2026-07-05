@@ -168,12 +168,14 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] Idempotent booking retries + per-caller rate limiting
 - [x] OpenAPI spec (served at `/openapi.json`) + TypeScript SDK (`@lulan/storefront-sdk`)
 - [x] Prometheus `/metrics` (OTLP traces planned)
+- [x] Itineraries: one-way, round-trip & multi-city (one atomic order across legs, round-trip fares)
+- [ ] Admin operations API: staff RBAC (IdP-backed), schedules/fares/refunds, `@lulan/admin-sdk`
 - [ ] Reference Next.js storefront + React Native boarding-crew app
 - [ ] `@lulan/validate` npm package (WASM build of the validator)
 
 ## Use cases
 
-Lulan models any business that reserves **capacity over space and time**: regional and low-cost airlines, intercity and commuter bus lines, ferries and RoRo vessels, rail and metro networks, shuttle and van fleets, cargo and parcel space, vehicle-deck slots, parking, and timed-entry ticketing.
+Lulan models any business that reserves **capacity over space and time**: regional and low-cost airlines, intercity and commuter bus lines, ferries and RoRo vessels, rail and metro networks, shuttle and van fleets, cargo and parcel space and vehicle-deck slots
 
 ## Contributing
 

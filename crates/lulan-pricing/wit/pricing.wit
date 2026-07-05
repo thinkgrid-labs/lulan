@@ -6,10 +6,13 @@
 // payloads encode. When the host migrates to the component model, modules
 // written against this file are source-compatible.
 
+// 0.3.0: added fare-rule-set.round-trip-discount-bp and rule-input
+//        journey-count / is-round-trip (host-derived itinerary context;
+//        defaults keep 0.2.0 rule JSON valid).
 // 0.2.0: added fare-rule-set.passenger-type-discounts and
 //        rule-input.passenger-type (both default-empty; 0.1.0 rule JSON
 //        remains valid).
-package lulan:pricing@0.2.0;
+package lulan:pricing@0.3.0;
 
 interface types {
     /// Money is integer minor units (e.g. centavos). Never floats.
@@ -43,6 +46,8 @@ interface types {
         promos: list<tuple<string, basis-points>>,
         /// passenger type (child/senior/pwd/...) -> discount bp
         passenger-type-discounts: list<tuple<string, basis-points>>,
+        /// discount for every item of a round-trip itinerary
+        round-trip-discount-bp: basis-points,
     }
 
     /// Host-derived scalars for one line item. Modules receive NO clock,
@@ -57,6 +62,10 @@ interface types {
         promo-code: option<string>,
         /// seat items: the passenger's type; pool items: none
         passenger-type: option<string>,
+        /// journeys in the itinerary (1 = one-way); host-derived
+        journey-count: u32,
+        /// out-and-back pairing; host-derived
+        is-round-trip: bool,
     }
 
     record adjustment {

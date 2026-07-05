@@ -115,6 +115,7 @@ fn rules_strategy() -> impl Strategy<Value = FareRuleSet> {
         advance,
         promos,
         passenger_discounts,
+        0i64..3_000,
     )
         .prop_map(
             |(
@@ -125,6 +126,7 @@ fn rules_strategy() -> impl Strategy<Value = FareRuleSet> {
                 advance_purchase_tiers,
                 promos,
                 passenger_type_discounts,
+                round_trip_discount_bp,
             )| FareRuleSet {
                 currency: "PHP".into(),
                 base_fare_per_segment,
@@ -134,6 +136,7 @@ fn rules_strategy() -> impl Strategy<Value = FareRuleSet> {
                 advance_purchase_tiers,
                 promos,
                 passenger_type_discounts,
+                round_trip_discount_bp,
             },
         )
 }
@@ -162,6 +165,8 @@ fn input_strategy() -> impl Strategy<Value = RuleInput> {
             Just(Some("senior".to_string())),
             Just(Some("alien".to_string())),
         ],
+        1u32..4,
+        proptest::bool::ANY,
     )
         .prop_map(
             |(
@@ -173,6 +178,8 @@ fn input_strategy() -> impl Strategy<Value = RuleInput> {
                 occupancy_bp,
                 promo_code,
                 passenger_type,
+                journey_count,
+                is_round_trip,
             )| RuleInput {
                 fare_key,
                 segments,
@@ -182,6 +189,8 @@ fn input_strategy() -> impl Strategy<Value = RuleInput> {
                 occupancy_bp,
                 promo_code,
                 passenger_type,
+                journey_count,
+                is_round_trip,
             },
         )
 }
@@ -231,6 +240,8 @@ fn wasm_call_latency_within_prd_target() {
         occupancy_bp: 6_000,
         promo_code: Some("PROMO1".into()),
         passenger_type: Some("senior".into()),
+        journey_count: 2,
+        is_round_trip: true,
     };
 
     // Warm-up, then measure (instantiate-per-call included).

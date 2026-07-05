@@ -2,102 +2,250 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Lulan API",
-    "description": "Open-source headless reservation engine for transit: segment-aware inventory, race-free booking, signed quotes, per-passenger Ed25519 QR tickets with offline validation, webhooks, and API-key auth.\n\nAuthentication: storefront endpoints (search, quotes, orders) work unauthenticated with guest checkout (`guest_contact` + retrieval token) or with a customer JWT (`Authorization: Bearer <jwt>`, operator IdP). Server-to-server endpoints take an API key via `X-Api-Key` — roles: `operator_admin` (webhooks/keys), `integration` (read any order), `validator` (scan sync). `POST /v1/orders` honours an `Idempotency-Key` header: the first 201 for a key is stored and replayed verbatim on retries.",
-    "version": "0.6.0",
-    "license": { "name": "AGPL-3.0", "identifier": "AGPL-3.0-only" }
+    "description": "Open-source headless reservation engine for transit: segment-aware inventory, race-free booking, itineraries (one-way, round-trip, multi-city), signed quotes, per-passenger Ed25519 QR tickets with offline validation, webhooks, and API-key auth.\n\nAuthentication: storefront endpoints (search, quotes, orders) work unauthenticated with guest checkout (`guest_contact` + retrieval token) or with a customer JWT (`Authorization: Bearer <jwt>`, operator IdP). Server-to-server endpoints take an API key via `X-Api-Key` — roles: `operator_admin` (webhooks/keys), `integration` (read any order), `validator` (scan sync). `POST /v1/orders` honours an `Idempotency-Key` header: the first 201 for a key is stored and replayed verbatim on retries.",
+    "version": "0.6.5",
+    "license": {
+      "name": "AGPL-3.0",
+      "identifier": "AGPL-3.0-only"
+    }
   },
-  "servers": [{ "url": "http://localhost:8080" }],
+  "servers": [
+    {
+      "url": "http://localhost:8080"
+    }
+  ],
   "paths": {
     "/health/live": {
       "get": {
         "summary": "Liveness probe",
-        "tags": ["health"],
-        "responses": { "200": { "description": "Process is up" } }
+        "tags": [
+          "health"
+        ],
+        "responses": {
+          "200": {
+            "description": "Process is up"
+          }
+        }
       }
     },
     "/health/ready": {
       "get": {
         "summary": "Readiness probe (checks database and Redis)",
-        "tags": ["health"],
+        "tags": [
+          "health"
+        ],
         "responses": {
-          "200": { "description": "Ready to serve" },
-          "503": { "description": "A dependency is unavailable" }
+          "200": {
+            "description": "Ready to serve"
+          },
+          "503": {
+            "description": "A dependency is unavailable"
+          }
         }
       }
     },
     "/v1/trips/search": {
       "get": {
         "summary": "Search trips with span-aware availability",
-        "tags": ["trips"],
+        "tags": [
+          "trips"
+        ],
         "parameters": [
-          { "name": "origin", "in": "query", "required": true, "schema": { "type": "string" }, "example": "BTG" },
-          { "name": "destination", "in": "query", "required": true, "schema": { "type": "string" }, "example": "CEB" },
-          { "name": "date", "in": "query", "required": true, "schema": { "type": "string", "format": "date" } }
+          {
+            "name": "origin",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "BTG"
+          },
+          {
+            "name": "destination",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "CEB"
+          },
+          {
+            "name": "date",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            }
+          },
+          {
+            "name": "return_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Round-trip convenience: also search the reverse direction on this date (returned as return_trips)"
+          }
         ],
         "responses": {
           "200": {
             "description": "Matching departures with per-fare-class seat counts and pool capacity for the requested span",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TripSearchResponse" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TripSearchResponse"
+                }
+              }
+            }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
         }
       }
     },
     "/v1/trips/{trip_id}/availability": {
       "get": {
         "summary": "Per-seat and per-pool availability for a journey span",
-        "tags": ["trips"],
+        "tags": [
+          "trips"
+        ],
         "parameters": [
-          { "$ref": "#/components/parameters/TripId" },
-          { "name": "origin", "in": "query", "required": true, "schema": { "type": "string" } },
-          { "name": "destination", "in": "query", "required": true, "schema": { "type": "string" } }
+          {
+            "$ref": "#/components/parameters/TripId"
+          },
+          {
+            "name": "origin",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "destination",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
         ],
         "responses": {
           "200": {
             "description": "Every seat's availability on the exact span, plus pool remainders",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AvailabilityResponse" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AvailabilityResponse"
+                }
+              }
+            }
           },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/v1/trips/{trip_id}/holds": {
       "post": {
         "summary": "Soft-hold a seat span (TTL-backed, Redis)",
-        "tags": ["reservations"],
-        "parameters": [{ "$ref": "#/components/parameters/TripId" }],
+        "tags": [
+          "reservations"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TripId"
+          }
+        ],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HoldRequest" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HoldRequest"
+              }
+            }
+          }
         },
         "responses": {
-          "201": { "description": "Hold created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HoldResponse" } } } },
-          "409": { "$ref": "#/components/responses/Conflict" },
-          "503": { "description": "Holds unavailable (Redis down); claims still work" }
+          "201": {
+            "description": "Hold created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HoldResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "description": "Holds unavailable (Redis down); claims still work"
+          }
         }
       }
     },
     "/v1/holds/{hold_id}": {
       "delete": {
         "summary": "Release a hold",
-        "tags": ["reservations"],
-        "parameters": [{ "name": "hold_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
-        "responses": { "200": { "description": "Released (idempotent)" } }
+        "tags": [
+          "reservations"
+        ],
+        "parameters": [
+          {
+            "name": "hold_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Released (idempotent)"
+          }
+        }
       }
     },
     "/v1/trips/{trip_id}/claims": {
       "post": {
         "summary": "Directly claim a span (low-level; prefer POST /v1/orders)",
-        "tags": ["reservations"],
-        "parameters": [{ "$ref": "#/components/parameters/TripId" }],
+        "tags": [
+          "reservations"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TripId"
+          }
+        ],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ClaimRequest" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimRequest"
+              }
+            }
+          }
         },
         "responses": {
-          "201": { "description": "Claimed" },
-          "409": { "$ref": "#/components/responses/Conflict" }
+          "201": {
+            "description": "Claimed"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
         }
       }
     },
@@ -105,15 +253,36 @@
       "post": {
         "summary": "Price an itinerary and get a signed short-TTL quote token",
         "description": "Prices reflect passenger type (regulated concession fares: child, senior, disability), occupancy tiers, peak days, advance purchase, and promos. The returned quote_token locks these prices for checkout (5 minutes). Passenger type is part of the token's match key.",
-        "tags": ["quotes"],
+        "tags": [
+          "quotes"
+        ],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuoteRequest" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuoteRequest"
+              }
+            }
+          }
         },
         "responses": {
-          "200": { "description": "Itemised quote", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/QuoteResponse" } } } },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "200": {
+            "description": "Itemised quote",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuoteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
@@ -121,18 +290,50 @@
       "post": {
         "summary": "Create an order (atomic multi-passenger booking)",
         "description": "Claims every item atomically — any conflict rolls back the whole order. Authentication: either a customer JWT bearer token, or guest checkout with `guest_contact`. Supports `Idempotency-Key` for safe retries. With `quote_token`, quoted prices are honoured; without it, items are priced live.",
-        "tags": ["orders"],
-        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
-        "security": [{}, { "customerJwt": [] }],
+        "tags": [
+          "orders"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "security": [
+          {},
+          {
+            "customerJwt": []
+          }
+        ],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateOrderRequest" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrderRequest"
+              }
+            }
+          }
         },
         "responses": {
-          "201": { "description": "Order created, inventory locked (15-minute payment window)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateOrderResponse" } } } },
-          "400": { "$ref": "#/components/responses/BadRequest" },
-          "409": { "description": "An item lost the race; nothing was booked" },
-          "429": { "$ref": "#/components/responses/RateLimited" }
+          "201": {
+            "description": "Order created, inventory locked (15-minute payment window)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateOrderResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "description": "An item lost the race; nothing was booked"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
         }
       }
     },
@@ -140,99 +341,287 @@
       "get": {
         "summary": "Fetch an order with its event trail",
         "description": "Gated: pass the retrieval token (`?token=`), the owning customer's bearer JWT, or any API key.",
-        "tags": ["orders"],
-        "parameters": [
-          { "$ref": "#/components/parameters/OrderId" },
-          { "$ref": "#/components/parameters/RetrievalToken" }
+        "tags": [
+          "orders"
         ],
-        "security": [{}, { "customerJwt": [] }, { "apiKey": [] }],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/RetrievalToken"
+          }
+        ],
+        "security": [
+          {},
+          {
+            "customerJwt": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
         "responses": {
-          "200": { "description": "Order + events", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrderDetails" } } } },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "200": {
+            "description": "Order + events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
         }
       }
     },
     "/v1/orders/{order_id}/payment": {
       "post": {
         "summary": "Request payment (creates a provider intent)",
-        "tags": ["orders"],
-        "parameters": [{ "$ref": "#/components/parameters/OrderId" }],
+        "tags": [
+          "orders"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          }
+        ],
         "responses": {
-          "200": { "description": "Now pending payment", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PaymentResponse" } } } },
-          "409": { "$ref": "#/components/responses/Conflict" }
+          "200": {
+            "description": "Now pending payment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
         }
       }
     },
     "/v1/orders/{order_id}/cancel": {
       "post": {
         "summary": "Cancel an order (releases claims atomically)",
-        "tags": ["orders"],
-        "parameters": [{ "$ref": "#/components/parameters/OrderId" }],
+        "tags": [
+          "orders"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          }
+        ],
         "responses": {
-          "200": { "description": "Cancelled" },
-          "409": { "description": "Not cancellable in the current state" }
+          "200": {
+            "description": "Cancelled"
+          },
+          "409": {
+            "description": "Not cancellable in the current state"
+          }
         }
       }
     },
     "/v1/orders/{order_id}/claim": {
       "post": {
         "summary": "Attach a guest order to the authenticated customer",
-        "tags": ["customers"],
-        "security": [{ "customerJwt": [] }],
-        "parameters": [{ "$ref": "#/components/parameters/OrderId" }],
+        "tags": [
+          "customers"
+        ],
+        "security": [
+          {
+            "customerJwt": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          }
+        ],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "type": "object", "required": ["retrieval_token"], "properties": { "retrieval_token": { "type": "string" } } } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "retrieval_token"
+                ],
+                "properties": {
+                  "retrieval_token": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
         },
         "responses": {
-          "200": { "description": "Claimed" },
-          "403": { "description": "Invalid retrieval token" },
-          "409": { "description": "Already claimed" }
+          "200": {
+            "description": "Claimed"
+          },
+          "403": {
+            "description": "Invalid retrieval token"
+          },
+          "409": {
+            "description": "Already claimed"
+          }
         }
       }
     },
     "/v1/customers/me/orders": {
       "get": {
         "summary": "List the authenticated customer's orders",
-        "tags": ["customers"],
-        "security": [{ "customerJwt": [] }],
+        "tags": [
+          "customers"
+        ],
+        "security": [
+          {
+            "customerJwt": []
+          }
+        ],
         "responses": {
-          "200": { "description": "Orders, newest first", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/CustomerOrder" } } } } },
-          "401": { "$ref": "#/components/responses/Unauthorized" }
+          "200": {
+            "description": "Orders, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CustomerOrder"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
         }
       }
     },
     "/v1/payments/fake/webhook": {
       "post": {
         "summary": "FakeProvider capture webhook (dev). Idempotent; auto-issues tickets on success.",
-        "tags": ["payments"],
+        "tags": [
+          "payments"
+        ],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "type": "object", "required": ["payment_intent_id", "status"], "properties": { "payment_intent_id": { "type": "string" }, "status": { "type": "string", "enum": ["succeeded", "failed"] } } } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "payment_intent_id",
+                  "status"
+                ],
+                "properties": {
+                  "payment_intent_id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "succeeded",
+                      "failed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
         },
-        "responses": { "200": { "description": "Acknowledged (applied=false for duplicates)" } }
+        "responses": {
+          "200": {
+            "description": "Acknowledged (applied=false for duplicates)"
+          }
+        }
       }
     },
     "/v1/orders/{order_id}/tickets": {
       "get": {
         "summary": "Fetch issued tickets (signed QR tokens)",
-        "tags": ["tickets"],
-        "parameters": [{ "$ref": "#/components/parameters/OrderId" }, { "$ref": "#/components/parameters/RetrievalToken" }],
-        "security": [{}, { "customerJwt": [] }, { "apiKey": [] }],
+        "tags": [
+          "tickets"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/RetrievalToken"
+          }
+        ],
+        "security": [
+          {},
+          {
+            "customerJwt": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
         "responses": {
-          "200": { "description": "One ticket per passenger", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TicketsResponse" } } } },
-          "401": { "$ref": "#/components/responses/Unauthorized" }
+          "200": {
+            "description": "One ticket per passenger",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TicketsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
         }
       },
       "post": {
         "summary": "Issue tickets for a paid order (idempotent retry path)",
-        "tags": ["tickets"],
-        "parameters": [{ "$ref": "#/components/parameters/OrderId" }, { "$ref": "#/components/parameters/RetrievalToken" }],
-        "security": [{}, { "customerJwt": [] }, { "apiKey": [] }],
+        "tags": [
+          "tickets"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/RetrievalToken"
+          }
+        ],
+        "security": [
+          {},
+          {
+            "customerJwt": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
         "responses": {
-          "200": { "description": "Tickets (existing ones for already-ticketed orders)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TicketsResponse" } } } },
-          "409": { "description": "Order is not paid yet" }
+          "200": {
+            "description": "Tickets (existing ones for already-ticketed orders)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TicketsResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Order is not paid yet"
+          }
         }
       }
     },
@@ -240,9 +629,20 @@
       "get": {
         "summary": "Ed25519 public keys for offline ticket validation",
         "description": "Boarding devices cache this while online; @lulan/validate then verifies tickets with no server dependency.",
-        "tags": ["tickets"],
+        "tags": [
+          "tickets"
+        ],
         "responses": {
-          "200": { "description": "All signing keys' public halves", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TicketKeysResponse" } } } }
+          "200": {
+            "description": "All signing keys' public halves",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TicketKeysResponse"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -250,16 +650,41 @@
       "post": {
         "summary": "Sync a device's boarding-scan journal (batched, idempotent)",
         "description": "Requires a validator or operator_admin API key. Replaying a journal is harmless; duplicate scans across devices are recorded as cloned-QR evidence.",
-        "tags": ["tickets"],
-        "security": [{ "apiKey": [] }],
+        "tags": [
+          "tickets"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ScanSyncRequest" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanSyncRequest"
+              }
+            }
+          }
         },
         "responses": {
-          "200": { "description": "Per-scan outcomes", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ScanSyncResponse" } } } },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "403": { "description": "Key lacks the validator role" }
+          "200": {
+            "description": "Per-scan outcomes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanSyncResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Key lacks the validator role"
+          }
         }
       }
     },
@@ -267,149 +692,520 @@
       "post": {
         "summary": "Register a webhook endpoint (admin)",
         "description": "Deliveries are HMAC-signed: `X-Lulan-Signature: t=<unix>,v1=hex(hmac_sha256(secret, \"<t>.<body>\"))`. Retries with exponential backoff up to 8 attempts. Empty event_types subscribes to everything.",
-        "tags": ["webhooks"],
-        "security": [{ "apiKey": [] }],
+        "tags": [
+          "webhooks"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "type": "object", "required": ["url"], "properties": { "url": { "type": "string", "format": "uri" }, "event_types": { "type": "array", "items": { "type": "string" } } } } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "event_types": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
         },
         "responses": {
-          "201": { "description": "Registered; `secret` is returned exactly once", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WebhookEndpoint" } } } },
-          "401": { "$ref": "#/components/responses/Unauthorized" },
-          "403": { "description": "Key lacks operator_admin" }
+          "201": {
+            "description": "Registered; `secret` is returned exactly once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpoint"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Key lacks operator_admin"
+          }
         }
       },
       "get": {
         "summary": "List webhook endpoints (admin)",
-        "tags": ["webhooks"],
-        "security": [{ "apiKey": [] }],
-        "responses": { "200": { "description": "Endpoints (secrets never repeated)", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/WebhookEndpoint" } } } } } }
+        "tags": [
+          "webhooks"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Endpoints (secrets never repeated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WebhookEndpoint"
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/webhooks/{id}": {
       "delete": {
         "summary": "Deactivate a webhook endpoint (admin)",
-        "tags": ["webhooks"],
-        "security": [{ "apiKey": [] }],
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
-        "responses": { "200": { "description": "Deactivated" }, "404": { "$ref": "#/components/responses/NotFound" } }
+        "tags": [
+          "webhooks"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deactivated"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
       }
     },
     "/v1/api-keys": {
       "post": {
         "summary": "Mint an API key (admin; plaintext returned once)",
-        "tags": ["auth"],
-        "security": [{ "apiKey": [] }],
+        "tags": [
+          "auth"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "type": "object", "required": ["label", "role"], "properties": { "label": { "type": "string" }, "role": { "type": "string", "enum": ["operator_admin", "integration", "validator"] } } } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "label",
+                  "role"
+                ],
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "operator_admin",
+                      "integration",
+                      "validator"
+                    ]
+                  }
+                }
+              }
+            }
+          }
         },
-        "responses": { "200": { "description": "The new key — store it now" } }
+        "responses": {
+          "200": {
+            "description": "The new key — store it now"
+          }
+        }
       }
     },
     "/v1/api-keys/{id}": {
       "delete": {
         "summary": "Revoke an API key (admin)",
-        "tags": ["auth"],
-        "security": [{ "apiKey": [] }],
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
-        "responses": { "200": { "description": "Revoked" }, "404": { "$ref": "#/components/responses/NotFound" } }
+        "tags": [
+          "auth"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
       }
     },
     "/metrics": {
       "get": {
         "summary": "Prometheus metrics",
-        "tags": ["health"],
-        "responses": { "200": { "description": "Prometheus exposition format", "content": { "text/plain": {} } } }
+        "tags": [
+          "health"
+        ],
+        "responses": {
+          "200": {
+            "description": "Prometheus exposition format",
+            "content": {
+              "text/plain": {}
+            }
+          }
+        }
       }
     },
     "/openapi.json": {
       "get": {
         "summary": "This document",
-        "tags": ["health"],
-        "responses": { "200": { "description": "OpenAPI 3.0 spec" } }
+        "tags": [
+          "health"
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.0 spec"
+          }
+        }
       }
     }
   },
   "components": {
     "securitySchemes": {
-      "apiKey": { "type": "apiKey", "in": "header", "name": "X-Api-Key", "description": "Server-to-server key (llk_…) with a role" },
-      "customerJwt": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT", "description": "Customer token from the operator's IdP" }
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Api-Key",
+        "description": "Server-to-server key (llk_…) with a role"
+      },
+      "customerJwt": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Customer token from the operator's IdP"
+      }
     },
     "parameters": {
-      "TripId": { "name": "trip_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
-      "OrderId": { "name": "order_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
-      "RetrievalToken": { "name": "token", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Guest retrieval token issued at order creation" },
-      "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "required": false, "schema": { "type": "string" }, "description": "The first 201 for a key is stored and replayed verbatim on retries" }
+      "TripId": {
+        "name": "trip_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "OrderId": {
+        "name": "order_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "RetrievalToken": {
+        "name": "token",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Guest retrieval token issued at order creation"
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "schema": {
+          "type": "string"
+        },
+        "description": "The first 201 for a key is stored and replayed verbatim on retries"
+      }
     },
     "responses": {
-      "BadRequest": { "description": "Malformed request", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "Unauthorized": { "description": "Missing or invalid credential", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "NotFound": { "description": "No such resource", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "Conflict": { "description": "State conflict (raced or wrong lifecycle state)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-      "RateLimited": { "description": "Rate limit exceeded (sliding window per key/IP)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+      "BadRequest": {
+        "description": "Malformed request",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid credential",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such resource",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "State conflict (raced or wrong lifecycle state)",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Rate limit exceeded (sliding window per key/IP)",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
     },
     "schemas": {
       "Error": {
         "type": "object",
-        "required": ["error"],
-        "properties": { "error": { "type": "string" } }
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
       },
-      "PassengerType": { "type": "string", "enum": ["adult", "child", "senior", "pwd", "infant"] },
-      "OrderStatus": { "type": "string", "enum": ["locked", "pending_payment", "paid", "ticketed", "boarded", "cancelled", "expired"] },
+      "PassengerType": {
+        "type": "string",
+        "enum": [
+          "adult",
+          "child",
+          "senior",
+          "pwd",
+          "infant"
+        ]
+      },
+      "OrderStatus": {
+        "type": "string",
+        "enum": [
+          "locked",
+          "pending_payment",
+          "paid",
+          "ticketed",
+          "boarded",
+          "cancelled",
+          "expired"
+        ]
+      },
       "Passenger": {
         "type": "object",
-        "required": ["full_name", "type"],
+        "required": [
+          "full_name",
+          "type"
+        ],
         "properties": {
-          "full_name": { "type": "string" },
-          "type": { "$ref": "#/components/schemas/PassengerType" },
-          "birthdate": { "type": "string", "format": "date", "description": "Optional; lets staff verify age-based fares at boarding" }
+          "full_name": {
+            "type": "string"
+          },
+          "type": {
+            "$ref": "#/components/schemas/PassengerType"
+          },
+          "birthdate": {
+            "type": "string",
+            "format": "date",
+            "description": "Optional; lets staff verify age-based fares at boarding"
+          }
         }
       },
       "OrderItemRequest": {
         "type": "object",
-        "required": ["unit_code", "origin", "destination"],
+        "required": [
+          "unit_code",
+          "origin",
+          "destination"
+        ],
         "properties": {
-          "unit_code": { "type": "string", "example": "12A" },
-          "origin": { "type": "string", "example": "BTG" },
-          "destination": { "type": "string", "example": "CEB" },
-          "quantity": { "type": "integer", "default": 1, "description": "Pool items only" },
-          "passenger": { "type": "integer", "description": "Index into passengers[]. Required for seats unless there is exactly one passenger; forbidden for pools" },
-          "hold_id": { "type": "string", "format": "uuid", "description": "Hold to consume (released on success)" }
+          "unit_code": {
+            "type": "string",
+            "example": "12A"
+          },
+          "origin": {
+            "type": "string",
+            "example": "BTG"
+          },
+          "destination": {
+            "type": "string",
+            "example": "CEB"
+          },
+          "quantity": {
+            "type": "integer",
+            "default": 1,
+            "description": "Pool items only"
+          },
+          "passenger": {
+            "type": "integer",
+            "description": "Index into passengers[]. Required for seats unless there is exactly one passenger; forbidden for pools"
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Hold to consume (released on success)"
+          }
         }
       },
       "CreateOrderRequest": {
         "type": "object",
-        "required": ["trip_id", "passengers", "items"],
+        "required": [
+          "passengers"
+        ],
         "properties": {
-          "trip_id": { "type": "string", "format": "uuid" },
-          "passengers": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "$ref": "#/components/schemas/Passenger" } },
-          "guest_contact": { "type": "string", "description": "Email or phone; required unless authenticated as a customer" },
-          "quote_token": { "type": "string", "description": "Locks prices from POST /v1/quotes" },
-          "promo_code": { "type": "string", "description": "Live pricing only" },
-          "items": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/OrderItemRequest" } }
-        }
+          "trip_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Single-journey shape (with items)"
+          },
+          "passengers": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/Passenger"
+            }
+          },
+          "guest_contact": {
+            "type": "string",
+            "description": "Email or phone; required unless authenticated as a customer"
+          },
+          "quote_token": {
+            "type": "string",
+            "description": "Locks prices from POST /v1/quotes"
+          },
+          "promo_code": {
+            "type": "string",
+            "description": "Live pricing only"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/OrderItemRequest"
+            }
+          },
+          "journeys": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/OrderJourney"
+            }
+          }
+        },
+        "description": "An itinerary: either journeys[] (round-trip / multi-city) or the single-trip shape trip_id + items (sugar for a one-journey itinerary). Trip type is derived: 1 journey = one-way; 2 journeys with reversed O&D = round-trip (round-trip fare rules apply); otherwise multi-city."
       },
       "OrderRecord": {
         "type": "object",
         "properties": {
-          "order_id": { "type": "string", "format": "uuid" },
-          "trip_id": { "type": "string", "format": "uuid" },
-          "passenger_name": { "type": "string", "description": "Lead passenger" },
-          "status": { "$ref": "#/components/schemas/OrderStatus" },
-          "total_minor": { "type": "integer", "format": "int64", "description": "Sum of item prices, minor units" },
-          "currency": { "type": "string", "example": "PHP" },
-          "payment_intent_id": { "type": "string", "nullable": true },
-          "expires_at": { "type": "string", "format": "date-time", "nullable": true },
+          "order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "passenger_name": {
+            "type": "string",
+            "description": "Lead passenger"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OrderStatus"
+          },
+          "total_minor": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Sum of item prices, minor units"
+          },
+          "currency": {
+            "type": "string",
+            "example": "PHP"
+          },
+          "payment_intent_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
           "passengers": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "id": { "type": "string", "format": "uuid" },
-                "full_name": { "type": "string" },
-                "passenger_type": { "$ref": "#/components/schemas/PassengerType" },
-                "birthdate": { "type": "string", "format": "date", "nullable": true }
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "full_name": {
+                  "type": "string"
+                },
+                "passenger_type": {
+                  "$ref": "#/components/schemas/PassengerType"
+                },
+                "birthdate": {
+                  "type": "string",
+                  "format": "date",
+                  "nullable": true
+                }
               }
             }
           },
@@ -418,34 +1214,80 @@
             "items": {
               "type": "object",
               "properties": {
-                "unit_code": { "type": "string" },
-                "kind": { "type": "string", "enum": ["seat", "pool"] },
-                "from_index": { "type": "integer" },
-                "to_index": { "type": "integer" },
-                "quantity": { "type": "integer" },
-                "price_minor": { "type": "integer", "format": "int64" },
-                "passenger_id": { "type": "string", "format": "uuid", "nullable": true }
+                "unit_code": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "seat",
+                    "pool"
+                  ]
+                },
+                "from_index": {
+                  "type": "integer"
+                },
+                "to_index": {
+                  "type": "integer"
+                },
+                "quantity": {
+                  "type": "integer"
+                },
+                "price_minor": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "passenger_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "nullable": true
+                },
+                "trip_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
               }
             }
+          },
+          "trip_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Distinct trips this itinerary touches, in item order"
           }
         }
       },
       "CreateOrderResponse": {
         "allOf": [
-          { "$ref": "#/components/schemas/OrderRecord" },
+          {
+            "$ref": "#/components/schemas/OrderRecord"
+          },
           {
             "type": "object",
-            "required": ["retrieval_token"],
+            "required": [
+              "retrieval_token"
+            ],
             "properties": {
-              "retrieval_token": { "type": "string", "description": "Read credential for this order — deliver to the guest" },
-              "customer_id": { "type": "string", "format": "uuid", "nullable": true }
+              "retrieval_token": {
+                "type": "string",
+                "description": "Read credential for this order — deliver to the guest"
+              },
+              "customer_id": {
+                "type": "string",
+                "format": "uuid",
+                "nullable": true
+              }
             }
           }
         ]
       },
       "OrderDetails": {
         "allOf": [
-          { "$ref": "#/components/schemas/OrderRecord" },
+          {
+            "$ref": "#/components/schemas/OrderRecord"
+          },
           {
             "type": "object",
             "properties": {
@@ -454,9 +1296,16 @@
                 "items": {
                   "type": "object",
                   "properties": {
-                    "stream_seq": { "type": "integer" },
-                    "event_type": { "type": "string" },
-                    "occurred_at": { "type": "string", "format": "date-time" }
+                    "stream_seq": {
+                      "type": "integer"
+                    },
+                    "event_type": {
+                      "type": "string"
+                    },
+                    "occurred_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
                   }
                 }
               }
@@ -467,104 +1316,231 @@
       "PaymentResponse": {
         "type": "object",
         "properties": {
-          "order_id": { "type": "string", "format": "uuid" },
-          "status": { "$ref": "#/components/schemas/OrderStatus" },
-          "payment_intent_id": { "type": "string" }
+          "order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OrderStatus"
+          },
+          "payment_intent_id": {
+            "type": "string"
+          }
         }
       },
       "CustomerOrder": {
         "type": "object",
         "properties": {
-          "order_id": { "type": "string", "format": "uuid" },
-          "trip_id": { "type": "string", "format": "uuid" },
-          "status": { "type": "string" },
-          "total_minor": { "type": "integer", "format": "int64" },
-          "currency": { "type": "string" },
-          "created_at": { "type": "string", "format": "date-time" }
-        }
-      },
-      "QuoteRequest": {
-        "type": "object",
-        "required": ["trip_id", "items"],
-        "properties": {
-          "trip_id": { "type": "string", "format": "uuid" },
-          "promo_code": { "type": "string" },
-          "items": {
+          "order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string"
+          },
+          "total_minor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "trip_ids": {
             "type": "array",
             "items": {
-              "type": "object",
-              "required": ["unit_code", "origin", "destination"],
-              "properties": {
-                "unit_code": { "type": "string" },
-                "origin": { "type": "string" },
-                "destination": { "type": "string" },
-                "quantity": { "type": "integer", "default": 1 },
-                "passenger_type": { "$ref": "#/components/schemas/PassengerType" }
-              }
+              "type": "string",
+              "format": "uuid"
             }
           }
         }
       },
+      "QuoteRequest": {
+        "type": "object",
+        "properties": {
+          "trip_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "promo_code": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "unit_code",
+                "origin",
+                "destination"
+              ],
+              "properties": {
+                "unit_code": {
+                  "type": "string"
+                },
+                "origin": {
+                  "type": "string"
+                },
+                "destination": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "type": "integer",
+                  "default": 1
+                },
+                "passenger_type": {
+                  "$ref": "#/components/schemas/PassengerType"
+                }
+              }
+            }
+          },
+          "journeys": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/QuoteJourney"
+            }
+          }
+        },
+        "description": "Same itinerary shapes as order creation: journeys[] or trip_id + items."
+      },
       "QuoteResponse": {
         "type": "object",
         "properties": {
-          "trip_id": { "type": "string", "format": "uuid" },
-          "currency": { "type": "string" },
-          "total_minor": { "type": "integer", "format": "int64" },
-          "expires_at": { "type": "string", "format": "date-time" },
-          "quote_token": { "type": "string" },
+          "currency": {
+            "type": "string"
+          },
+          "total_minor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "quote_token": {
+            "type": "string"
+          },
           "items": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "unit_code": { "type": "string" },
-                "origin": { "type": "string" },
-                "destination": { "type": "string" },
-                "quantity": { "type": "integer" },
-                "passenger_type": { "$ref": "#/components/schemas/PassengerType" },
-                "base_minor": { "type": "integer", "format": "int64" },
-                "total_minor": { "type": "integer", "format": "int64" },
+                "unit_code": {
+                  "type": "string"
+                },
+                "origin": {
+                  "type": "string"
+                },
+                "destination": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "type": "integer"
+                },
+                "passenger_type": {
+                  "$ref": "#/components/schemas/PassengerType"
+                },
+                "base_minor": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "total_minor": {
+                  "type": "integer",
+                  "format": "int64"
+                },
                 "adjustments": {
                   "type": "array",
                   "items": {
                     "type": "object",
                     "properties": {
-                      "label": { "type": "string", "example": "passenger:senior" },
-                      "amount_minor": { "type": "integer", "format": "int64" }
+                      "label": {
+                        "type": "string",
+                        "example": "passenger:senior"
+                      },
+                      "amount_minor": {
+                        "type": "integer",
+                        "format": "int64"
+                      }
                     }
                   }
+                },
+                "trip_id": {
+                  "type": "string",
+                  "format": "uuid"
                 }
               }
             }
+          },
+          "journey_count": {
+            "type": "integer"
+          },
+          "is_round_trip": {
+            "type": "boolean"
           }
         }
       },
       "HoldRequest": {
         "type": "object",
-        "required": ["unit_code", "origin", "destination"],
+        "required": [
+          "unit_code",
+          "origin",
+          "destination"
+        ],
         "properties": {
-          "unit_code": { "type": "string" },
-          "origin": { "type": "string" },
-          "destination": { "type": "string" }
+          "unit_code": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "destination": {
+            "type": "string"
+          }
         }
       },
       "HoldResponse": {
         "type": "object",
         "properties": {
-          "hold_id": { "type": "string", "format": "uuid" },
-          "expires_at": { "type": "string", "format": "date-time" }
+          "hold_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
         }
       },
       "ClaimRequest": {
         "type": "object",
-        "required": ["unit_code", "origin", "destination"],
+        "required": [
+          "unit_code",
+          "origin",
+          "destination"
+        ],
         "properties": {
-          "unit_code": { "type": "string" },
-          "origin": { "type": "string" },
-          "destination": { "type": "string" },
-          "quantity": { "type": "integer", "default": 1 },
-          "hold_id": { "type": "string", "format": "uuid" }
+          "unit_code": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "destination": {
+            "type": "string"
+          },
+          "quantity": {
+            "type": "integer",
+            "default": 1
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid"
+          }
         }
       },
       "TripSearchResponse": {
@@ -575,20 +1551,40 @@
             "items": {
               "type": "object",
               "properties": {
-                "trip_id": { "type": "string", "format": "uuid" },
-                "route": { "type": "string" },
-                "vessel": { "type": "string" },
-                "departs_at": { "type": "string", "format": "date-time" },
-                "from_index": { "type": "integer" },
-                "to_index": { "type": "integer" },
+                "trip_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "route": {
+                  "type": "string"
+                },
+                "vessel": {
+                  "type": "string"
+                },
+                "departs_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "from_index": {
+                  "type": "integer"
+                },
+                "to_index": {
+                  "type": "integer"
+                },
                 "seats": {
                   "type": "array",
                   "items": {
                     "type": "object",
                     "properties": {
-                      "fare_class": { "type": "string" },
-                      "total": { "type": "integer" },
-                      "available": { "type": "integer" }
+                      "fare_class": {
+                        "type": "string"
+                      },
+                      "total": {
+                        "type": "integer"
+                      },
+                      "available": {
+                        "type": "integer"
+                      }
                     }
                   }
                 },
@@ -597,30 +1593,107 @@
                   "items": {
                     "type": "object",
                     "properties": {
-                      "code": { "type": "string" },
-                      "remaining": { "type": "integer" }
+                      "code": {
+                        "type": "string"
+                      },
+                      "remaining": {
+                        "type": "integer"
+                      }
                     }
                   }
                 }
               }
             }
+          },
+          "return_trips": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "trip_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "route": {
+                  "type": "string"
+                },
+                "vessel": {
+                  "type": "string"
+                },
+                "departs_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "from_index": {
+                  "type": "integer"
+                },
+                "to_index": {
+                  "type": "integer"
+                },
+                "seats": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "fare_class": {
+                        "type": "string"
+                      },
+                      "total": {
+                        "type": "integer"
+                      },
+                      "available": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                },
+                "pools": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "code": {
+                        "type": "string"
+                      },
+                      "remaining": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "description": "Present when return_date was given"
           }
         }
       },
       "AvailabilityResponse": {
         "type": "object",
         "properties": {
-          "trip_id": { "type": "string", "format": "uuid" },
-          "from_index": { "type": "integer" },
-          "to_index": { "type": "integer" },
+          "trip_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "from_index": {
+            "type": "integer"
+          },
+          "to_index": {
+            "type": "integer"
+          },
           "seats": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "code": { "type": "string" },
-                "fare_class": { "type": "string" },
-                "available": { "type": "boolean" }
+                "code": {
+                  "type": "string"
+                },
+                "fare_class": {
+                  "type": "string"
+                },
+                "available": {
+                  "type": "boolean"
+                }
               }
             }
           },
@@ -629,8 +1702,12 @@
             "items": {
               "type": "object",
               "properties": {
-                "code": { "type": "string" },
-                "remaining": { "type": "integer" }
+                "code": {
+                  "type": "string"
+                },
+                "remaining": {
+                  "type": "integer"
+                }
               }
             }
           }
@@ -639,18 +1716,41 @@
       "TicketsResponse": {
         "type": "object",
         "properties": {
-          "order_id": { "type": "string", "format": "uuid" },
+          "order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "tickets": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "ticket_id": { "type": "string", "format": "uuid" },
-                "passenger_id": { "type": "string", "format": "uuid" },
-                "passenger_name": { "type": "string" },
-                "unit_code": { "type": "string" },
-                "status": { "type": "string", "enum": ["issued", "boarded", "void"] },
-                "token": { "type": "string", "description": "Signed QR payload (LT1.<payload>.<sig>); render as QR client-side" }
+                "ticket_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "passenger_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "passenger_name": {
+                  "type": "string"
+                },
+                "unit_code": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "issued",
+                    "boarded",
+                    "void"
+                  ]
+                },
+                "token": {
+                  "type": "string",
+                  "description": "Signed QR payload (LT1.<payload>.<sig>); render as QR client-side"
+                }
               }
             }
           }
@@ -664,9 +1764,17 @@
             "items": {
               "type": "object",
               "properties": {
-                "kid": { "type": "string" },
-                "alg": { "type": "string", "example": "Ed25519" },
-                "public_key": { "type": "string", "description": "base64url, 32 bytes" }
+                "kid": {
+                  "type": "string"
+                },
+                "alg": {
+                  "type": "string",
+                  "example": "Ed25519"
+                },
+                "public_key": {
+                  "type": "string",
+                  "description": "base64url, 32 bytes"
+                }
               }
             }
           }
@@ -674,19 +1782,36 @@
       },
       "ScanSyncRequest": {
         "type": "object",
-        "required": ["device_id", "scans"],
+        "required": [
+          "device_id",
+          "scans"
+        ],
         "properties": {
-          "device_id": { "type": "string" },
+          "device_id": {
+            "type": "string"
+          },
           "scans": {
             "type": "array",
             "maxItems": 1000,
             "items": {
               "type": "object",
-              "required": ["ticket_id", "scanned_at"],
+              "required": [
+                "ticket_id",
+                "scanned_at"
+              ],
               "properties": {
-                "ticket_id": { "type": "string", "format": "uuid" },
-                "scanned_at": { "type": "string", "format": "date-time" },
-                "result": { "type": "string", "default": "ok" }
+                "ticket_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "scanned_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "result": {
+                  "type": "string",
+                  "default": "ok"
+                }
               }
             }
           }
@@ -700,9 +1825,23 @@
             "items": {
               "type": "object",
               "properties": {
-                "ticket_id": { "type": "string", "format": "uuid" },
-                "status": { "type": "string", "enum": ["boarded", "already_boarded", "duplicate_scan", "unknown_ticket"] },
-                "order_status": { "type": "string", "nullable": true }
+                "ticket_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "boarded",
+                    "already_boarded",
+                    "duplicate_scan",
+                    "unknown_ticket"
+                  ]
+                },
+                "order_status": {
+                  "type": "string",
+                  "nullable": true
+                }
               }
             }
           }
@@ -711,11 +1850,90 @@
       "WebhookEndpoint": {
         "type": "object",
         "properties": {
-          "id": { "type": "string", "format": "uuid" },
-          "url": { "type": "string", "format": "uri" },
-          "event_types": { "type": "array", "items": { "type": "string" } },
-          "active": { "type": "boolean" },
-          "secret": { "type": "string", "description": "Present only in the creation response" }
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "event_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "secret": {
+            "type": "string",
+            "description": "Present only in the creation response"
+          }
+        }
+      },
+      "OrderJourney": {
+        "type": "object",
+        "required": [
+          "trip_id",
+          "items"
+        ],
+        "properties": {
+          "trip_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/OrderItemRequest"
+            }
+          }
+        }
+      },
+      "QuoteJourney": {
+        "type": "object",
+        "required": [
+          "trip_id",
+          "items"
+        ],
+        "properties": {
+          "trip_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "unit_code",
+                "origin",
+                "destination"
+              ],
+              "properties": {
+                "unit_code": {
+                  "type": "string"
+                },
+                "origin": {
+                  "type": "string"
+                },
+                "destination": {
+                  "type": "string"
+                },
+                "quantity": {
+                  "type": "integer",
+                  "default": 1
+                },
+                "passenger_type": {
+                  "$ref": "#/components/schemas/PassengerType"
+                }
+              }
+            }
+          }
         }
       }
     }

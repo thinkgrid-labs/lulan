@@ -33,7 +33,7 @@ async fn setup(offset: i64) -> Option<(PgPool, Uuid)> {
     lulan_api::seed::seed(&pool).await.expect("seed");
 
     let trip_id: Uuid =
-        sqlx::query("SELECT id FROM trips ORDER BY departs_at DESC LIMIT 1 OFFSET $1")
+        sqlx::query("SELECT t.id FROM trips t JOIN routes r ON r.id = t.route_id WHERE r.code = 'BTG-CEB' ORDER BY t.departs_at DESC LIMIT 1 OFFSET $1")
             .bind(offset)
             .fetch_one(&pool)
             .await

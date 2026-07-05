@@ -1,7 +1,8 @@
-//! Signed price quotes (Phase 4): checkout can honour a quoted price
-//! without recomputing it — integrity comes from an HMAC-SHA256 tag, and
-//! staleness from a short TTL. Tampering with the payload or outliving
-//! the TTL both invalidate the token; the client then simply re-quotes.
+//! Signed price quotes (Phase 4, itinerary-shaped since Phase 6.5):
+//! checkout can honour a quoted price without recomputing it — integrity
+//! comes from an HMAC-SHA256 tag, and staleness from a short TTL.
+//! Tampering with the payload or outliving the TTL both invalidate the
+//! token; the client then simply re-quotes.
 
 use axum::Json;
 use axum::extract::State;
@@ -15,7 +16,7 @@ use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::error::ApiError;
-use crate::pricing::{PriceableItem, price_items};
+use crate::pricing::{JourneyItem, PriceableItem, journey_context, price_items};
 use crate::state::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -23,10 +24,9 @@ type HmacSha256 = Hmac<Sha256>;
 pub const QUOTE_TTL_SECONDS: i64 = 300;
 
 /// The signed payload. Items are matched back to order requests by
-/// (unit_code, origin, destination, quantity).
+/// (trip_id, unit_code, origin, destination, quantity, passenger_type).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QuoteToken {
-    pub trip_id: Uuid,
     pub currency: String,
     pub total_minor: i64,
     /// Unix seconds after which the quote is dead.
@@ -36,6 +36,7 @@ pub struct QuoteToken {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QuoteTokenItem {
+    pub trip_id: Uuid,
     pub unit_code: String,
     pub origin: String,
     pub destination: String,
@@ -68,18 +69,62 @@ pub fn verify(secret: &[u8], token: &str) -> Option<QuoteToken> {
     (decoded.exp > Utc::now().timestamp()).then_some(decoded)
 }
 
+/// One journey (leg) of an itinerary request.
+#[derive(Debug, Deserialize)]
+pub struct JourneyRequest {
+    pub trip_id: Uuid,
+    pub items: Vec<JourneyItem>,
+}
+
+/// Itinerary shape (`journeys`) or the single-trip shape (`trip_id` +
+/// `items`) — a one-way is just a one-journey itinerary.
 #[derive(Deserialize)]
 pub struct QuoteRequest {
-    trip_id: Uuid,
+    #[serde(default)]
+    trip_id: Option<Uuid>,
+    #[serde(default)]
+    items: Option<Vec<JourneyItem>>,
+    #[serde(default)]
+    journeys: Option<Vec<JourneyRequest>>,
     #[serde(default)]
     promo_code: Option<String>,
-    items: Vec<PriceableItem>,
+}
+
+/// Normalise either request shape into journeys. Shared with orders.
+pub fn normalize_journeys(
+    trip_id: Option<Uuid>,
+    items: Option<Vec<JourneyItem>>,
+    journeys: Option<Vec<JourneyRequest>>,
+) -> Result<Vec<(Uuid, Vec<JourneyItem>)>, ApiError> {
+    match (trip_id, items, journeys) {
+        (None, None, Some(journeys)) => {
+            if journeys.is_empty() || journeys.iter().any(|j| j.items.is_empty()) {
+                return Err(ApiError::BadRequest(
+                    "every journey needs at least one item".into(),
+                ));
+            }
+            if journeys.len() > 8 {
+                return Err(ApiError::BadRequest("max 8 journeys per itinerary".into()));
+            }
+            Ok(journeys.into_iter().map(|j| (j.trip_id, j.items)).collect())
+        }
+        (Some(trip_id), Some(items), None) => {
+            if items.is_empty() {
+                return Err(ApiError::BadRequest("needs at least one item".into()));
+            }
+            Ok(vec![(trip_id, items)])
+        }
+        _ => Err(ApiError::BadRequest(
+            "provide either journeys[] or trip_id + items".into(),
+        )),
+    }
 }
 
 #[derive(Serialize)]
 pub struct QuoteResponse {
-    trip_id: Uuid,
     currency: String,
+    journey_count: u32,
+    is_round_trip: bool,
     items: Vec<QuotedItem>,
     total_minor: i64,
     expires_at: chrono::DateTime<Utc>,
@@ -89,6 +134,7 @@ pub struct QuoteResponse {
 
 #[derive(Serialize)]
 pub struct QuotedItem {
+    trip_id: Uuid,
     unit_code: String,
     origin: String,
     destination: String,
@@ -103,23 +149,36 @@ pub async fn create(
     State(state): State<AppState>,
     Json(req): Json<QuoteRequest>,
 ) -> Result<Json<QuoteResponse>, ApiError> {
-    if req.items.is_empty() {
-        return Err(ApiError::BadRequest("quote needs at least one item".into()));
-    }
-    let priced = price_items(&state, req.trip_id, &req.items, req.promo_code.as_deref()).await?;
+    let journeys = normalize_journeys(req.trip_id, req.items, req.journeys)?;
+    let context = journey_context(&journeys);
+    let items: Vec<PriceableItem> = journeys
+        .iter()
+        .flat_map(|(trip_id, items)| {
+            items.iter().map(|i| PriceableItem {
+                trip_id: *trip_id,
+                unit_code: i.unit_code.clone(),
+                origin: i.origin.clone(),
+                destination: i.destination.clone(),
+                quantity: i.quantity,
+                passenger_type: i.passenger_type.clone(),
+            })
+        })
+        .collect();
+
+    let priced = price_items(&state, &items, req.promo_code.as_deref(), context).await?;
 
     let currency = priced[0].quote.currency.clone();
     let total_minor: i64 = priced.iter().map(|p| p.quote.total_minor).sum();
     let exp = Utc::now().timestamp() + QUOTE_TTL_SECONDS;
 
     let token = QuoteToken {
-        trip_id: req.trip_id,
         currency: currency.clone(),
         total_minor,
         exp,
         items: priced
             .iter()
             .map(|p| QuoteTokenItem {
+                trip_id: p.trip_id,
                 unit_code: p.unit_code.clone(),
                 origin: p.origin.clone(),
                 destination: p.destination.clone(),
@@ -132,11 +191,13 @@ pub async fn create(
     let quote_token = sign(&state.quote_secret, &token);
 
     Ok(Json(QuoteResponse {
-        trip_id: req.trip_id,
         currency,
+        journey_count: context.journey_count,
+        is_round_trip: context.is_round_trip,
         items: priced
             .into_iter()
             .map(|p| QuotedItem {
+                trip_id: p.trip_id,
                 unit_code: p.unit_code,
                 origin: p.origin,
                 destination: p.destination,

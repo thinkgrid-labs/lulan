@@ -21,10 +21,17 @@ use crate::state::AppState;
 
 const MAX_PASSENGERS: usize = 20;
 
+/// Itinerary shape (`journeys`) or single-trip shape (`trip_id`+`items`).
 #[derive(Deserialize)]
 pub struct CreateOrderRequest {
-    trip_id: Uuid,
-    /// The travelling party; passengers[0] is the lead/contact.
+    #[serde(default)]
+    trip_id: Option<Uuid>,
+    #[serde(default)]
+    items: Option<Vec<OrderItemRequest>>,
+    #[serde(default)]
+    journeys: Option<Vec<OrderJourneyRequest>>,
+    /// The travelling party; passengers[0] is the lead/contact. One list
+    /// spans every journey of the itinerary.
     passengers: Vec<PassengerRequest>,
     /// Guest checkout contact (email or phone). Required unless the
     /// request carries a customer bearer token.
@@ -37,6 +44,11 @@ pub struct CreateOrderRequest {
     /// Live-pricing only; quoted orders already have promos baked in.
     #[serde(default)]
     promo_code: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct OrderJourneyRequest {
+    trip_id: Uuid,
     items: Vec<OrderItemRequest>,
 }
 
@@ -83,9 +95,27 @@ pub async fn create(
     headers: HeaderMap,
     Json(req): Json<CreateOrderRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    if req.items.is_empty() {
-        return Err(ApiError::BadRequest("order needs at least one item".into()));
-    }
+    // Normalise both request shapes into journeys of (trip, items).
+    let journeys: Vec<(Uuid, Vec<OrderItemRequest>)> = match (req.trip_id, req.items, req.journeys)
+    {
+        (None, None, Some(journeys)) => {
+            if journeys.is_empty() || journeys.iter().any(|j| j.items.is_empty()) {
+                return Err(ApiError::BadRequest(
+                    "every journey needs at least one item".into(),
+                ));
+            }
+            if journeys.len() > 8 {
+                return Err(ApiError::BadRequest("max 8 journeys per itinerary".into()));
+            }
+            journeys.into_iter().map(|j| (j.trip_id, j.items)).collect()
+        }
+        (Some(trip_id), Some(items), None) if !items.is_empty() => vec![(trip_id, items)],
+        _ => {
+            return Err(ApiError::BadRequest(
+                "provide either journeys[] or trip_id + items".into(),
+            ));
+        }
+    };
     if req.passengers.is_empty() || req.passengers.len() > MAX_PASSENGERS {
         return Err(ApiError::BadRequest(format!(
             "orders need 1–{MAX_PASSENGERS} passengers"
@@ -160,33 +190,47 @@ pub async fn create(
             .map(|p| p.passenger_type.as_str().to_string())
     };
 
+    // Flatten journeys into (trip, item) pairs; derive itinerary context
+    // (journey_count, is_round_trip) for pricing.
+    let flat: Vec<(Uuid, &OrderItemRequest)> = journeys
+        .iter()
+        .flat_map(|(trip_id, items)| items.iter().map(move |i| (*trip_id, i)))
+        .collect();
+    let context = crate::pricing::journey_context(
+        &journeys
+            .iter()
+            .map(|(trip_id, items)| {
+                (
+                    *trip_id,
+                    items
+                        .iter()
+                        .map(|i| crate::pricing::JourneyItem {
+                            unit_code: i.unit_code.clone(),
+                            origin: i.origin.clone(),
+                            destination: i.destination.clone(),
+                            quantity: i.quantity,
+                            passenger_type: None,
+                        })
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
+
     let items: Vec<NewOrderItem> = match &req.quote_token {
         Some(token) => {
-            // Honour quoted prices — untampered, unexpired, same trip,
-            // covering every requested item including its passenger type.
+            // Honour quoted prices — untampered, unexpired, covering every
+            // requested item on its exact trip, including passenger type.
             let quote = crate::quotes::verify(&state.quote_secret, token)
                 .ok_or_else(|| ApiError::BadRequest("invalid or expired quote token".into()))?;
-            if quote.trip_id != req.trip_id {
-                return Err(ApiError::BadRequest(
-                    "quote token is for a different trip".into(),
-                ));
-            }
-            let mut items = Vec::with_capacity(req.items.len());
-            for item in &req.items {
+            let mut items = Vec::with_capacity(flat.len());
+            for (trip_id, item) in &flat {
                 let quantity = item.quantity.unwrap_or(1);
                 let target = inventory
-                    .resolve_target(
-                        req.trip_id,
-                        &item.unit_code,
-                        &item.origin,
-                        &item.destination,
-                    )
+                    .resolve_target(*trip_id, &item.unit_code, &item.origin, &item.destination)
                     .await?
                     .ok_or_else(|| {
-                        ApiError::NotFound(format!(
-                            "trip {} with unit {:?}",
-                            req.trip_id, item.unit_code
-                        ))
+                        ApiError::NotFound(format!("trip {trip_id} with unit {:?}", item.unit_code))
                     })?;
                 let passenger_type = if target.kind == "seat" {
                     seat_passenger_type(item)
@@ -197,7 +241,8 @@ pub async fn create(
                     .items
                     .iter()
                     .find(|q| {
-                        q.unit_code == item.unit_code
+                        q.trip_id == *trip_id
+                            && q.unit_code == item.unit_code
                             && q.origin == item.origin
                             && q.destination == item.destination
                             && q.quantity == quantity
@@ -210,6 +255,7 @@ pub async fn create(
                         ))
                     })?;
                 items.push(NewOrderItem {
+                    trip_id: *trip_id,
                     unit_code: item.unit_code.clone(),
                     origin: item.origin.clone(),
                     destination: item.destination.clone(),
@@ -221,10 +267,10 @@ pub async fn create(
             items
         }
         None => {
-            let priceable: Vec<crate::pricing::PriceableItem> = req
-                .items
+            let priceable: Vec<crate::pricing::PriceableItem> = flat
                 .iter()
-                .map(|i| crate::pricing::PriceableItem {
+                .map(|(trip_id, i)| crate::pricing::PriceableItem {
+                    trip_id: *trip_id,
                     unit_code: i.unit_code.clone(),
                     origin: i.origin.clone(),
                     destination: i.destination.clone(),
@@ -232,11 +278,12 @@ pub async fn create(
                     passenger_type: seat_passenger_type(i),
                 })
                 .collect();
-            crate::pricing::price_items(&state, req.trip_id, &priceable, req.promo_code.as_deref())
+            crate::pricing::price_items(&state, &priceable, req.promo_code.as_deref(), context)
                 .await?
                 .into_iter()
-                .zip(&req.items)
-                .map(|(p, i)| NewOrderItem {
+                .zip(&flat)
+                .map(|(p, (_, i))| NewOrderItem {
+                    trip_id: p.trip_id,
                     unit_code: p.unit_code,
                     origin: p.origin,
                     destination: p.destination,
@@ -248,7 +295,7 @@ pub async fn create(
         }
     };
 
-    match orders.create(req.trip_id, &passengers, &items).await? {
+    match orders.create(&passengers, &items).await? {
         CreateOutcome::Created(record) => {
             // Attach ownership/contact (created in the same request, so
             // visible before the response ever leaves).
@@ -262,7 +309,7 @@ pub async fn create(
 
             // Consumed holds have served their purpose; best-effort cleanup.
             if let Ok(holds) = state.holds() {
-                for hold_id in req.items.iter().filter_map(|i| i.hold_id) {
+                for hold_id in flat.iter().filter_map(|(_, i)| i.hold_id) {
                     let _ = holds.release(hold_id).await;
                 }
             }
