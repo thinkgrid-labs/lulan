@@ -48,6 +48,8 @@ async fn availability_answers_the_prd_example_over_http() {
     lulan_api::seed::seed(&pool).await.expect("seed");
 
     // The seeder marks seat 12A on the earliest trip with mask 0b101.
+    // Restore that fixture explicitly so this test is self-healing even if
+    // another run has touched the trip.
     let row =
         sqlx::query("SELECT id::text, service_date::text FROM trips ORDER BY departs_at LIMIT 1")
             .fetch_one(&pool)
@@ -55,6 +57,29 @@ async fn availability_answers_the_prd_example_over_http() {
             .unwrap();
     let trip_id: String = row.get(0);
     let date: String = row.get(1);
+    let trip_uuid = uuid::Uuid::parse_str(&trip_id).unwrap();
+    sqlx::query("UPDATE seat_occupancy SET occupied_mask = 0 WHERE trip_id = $1")
+        .bind(trip_uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE seat_occupancy so SET occupied_mask = 5
+         FROM capacity_units cu
+         WHERE so.trip_id = $1 AND cu.id = so.unit_id AND cu.code = '12A'",
+    )
+    .bind(trip_uuid)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE pool_occupancy po SET remaining = array_fill(cu.pool_capacity, ARRAY[3])
+         FROM capacity_units cu WHERE cu.id = po.unit_id AND po.trip_id = $1",
+    )
+    .bind(trip_uuid)
+    .execute(&pool)
+    .await
+    .unwrap();
 
     let app = lulan_api::router(AppState::new(Some(pool.clone()), None));
 

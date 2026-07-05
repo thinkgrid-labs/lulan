@@ -2,7 +2,9 @@
 //! checkout, tampering and cross-trip reuse are rejected, and promos
 //! flow through. Requires TEST_DATABASE_URL (skips otherwise).
 //!
-//! Uses trip offset 6 so other integration binaries' fixtures stay intact.
+//! Uses trip offset 2 (from the end) — offsets 0/1 belong to claims_it,
+//! 3/4/5 to orders_it, and the earliest trip (offset 6 of the 7-day seed)
+//! is the availability test's PRD-example fixture.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -51,7 +53,7 @@ async fn quotes_price_orders_and_reject_tampering() {
     lulan_api::seed::seed(&pool).await.unwrap();
 
     let trip_id: Uuid =
-        sqlx::query("SELECT id FROM trips ORDER BY departs_at DESC LIMIT 1 OFFSET 6")
+        sqlx::query("SELECT id FROM trips ORDER BY departs_at DESC LIMIT 1 OFFSET 2")
             .fetch_one(&pool)
             .await
             .unwrap()
