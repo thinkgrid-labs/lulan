@@ -1,0 +1,13 @@
+# Rust
+target/
+
+# Node
+node_modules/
+dist/
+.next/
+
+# Env & local
+.env
+.env.*
+!.env.example
+.DS_Store

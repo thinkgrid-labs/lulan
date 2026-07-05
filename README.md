@@ -143,6 +143,13 @@ No per-booking transaction fees.
 
 ---
 
+# Documentation
+
+- [Product Requirements Document](docs/PRD.md)
+- [Development Plan](docs/development-plan.md) — phased build sequence, repository layout, and architecture decisions
+
+---
+
 # Project Status
 
 > **⚠️ Active Development**
