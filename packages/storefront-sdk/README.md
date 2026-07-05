@@ -74,9 +74,9 @@ await lulan.claimOrder(guestOrderId, retrievalToken); // adopt a guest order
 ```ts
 const backend = new LulanClient({
   baseUrl: "https://api.operator.example",
-  apiKey: process.env.LULAN_API_KEY, // integration or conductor role
+  apiKey: process.env.LULAN_API_KEY, // integration or validator role
 });
-await backend.syncScans("gate-1", journal); // conductor devices
+await backend.syncScans("gate-1", journal); // crew devices
 ```
 
 ## Errors

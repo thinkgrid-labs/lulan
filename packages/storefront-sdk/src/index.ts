@@ -1,7 +1,7 @@
 /**
  * @lulan/storefront-sdk — typed client for the Lulan reservation engine.
  *
- * Types mirror docs/openapi.json (served live at GET /openapi.json).
+ * Types mirror the engine's OpenAPI spec (served live at GET /openapi.json).
  * Zero dependencies; works in Node 18+, browsers, and edge runtimes.
  *
  * ```ts
@@ -81,7 +81,7 @@ export interface QuoteItemRequest {
   origin: string;
   destination: string;
   quantity?: number;
-  /** Seat items: drives mandated discounts and the token's match key. */
+  /** Seat items: drives concession fares and the token's match key. */
   passenger_type?: PassengerType;
 }
 
@@ -387,12 +387,12 @@ export class LulanClient {
     return this.request("POST", `/v1/orders/${orderId}/tickets${query}`, {}, options);
   }
 
-  /** Public keys for offline validation — cache these on conductor devices. */
+  /** Public keys for offline validation — cache these on crew devices. */
   ticketKeys(options?: RequestOptions): Promise<{ keys: TicketKey[] }> {
     return this.request("GET", "/v1/ticket-keys", undefined, options);
   }
 
-  /** Conductor devices: sync the boarding journal (requires a conductor API key). */
+  /** Boarding devices: sync the scan journal (requires a validator API key). */
   syncScans(deviceId: string, scans: ScanRequest[], options?: RequestOptions): Promise<{ outcomes: ScanOutcome[] }> {
     return this.request("POST", "/v1/scans", { device_id: deviceId, scans }, options);
   }

@@ -1,4 +1,4 @@
-//! A conductor device at the gate with NO connectivity: verifies a scanned
+//! A crew device at the gate with NO connectivity: verifies a scanned
 //! QR token against a key set cached earlier from `GET /v1/ticket-keys`.
 //!
 //! Usage: offline_gate <keys.json> <token> [expected_trip_uuid]

@@ -3,7 +3,7 @@
 //!
 //! - `operator_admin` — manage webhooks and API keys (audited)
 //! - `integration`    — trusted storefront backends (read any order)
-//! - `conductor`      — boarding devices (sync scans)
+//! - `validator`      — ticket-validation devices — gates, crew handhelds (sync scans)
 //!
 //! Keys look like `llk_<64 hex chars>`; only their SHA-256 is stored.
 //! The first admin key comes from the `LULAN_BOOTSTRAP_ADMIN_KEY` env var
@@ -25,7 +25,7 @@ use crate::state::AppState;
 pub enum ApiRole {
     OperatorAdmin,
     Integration,
-    Conductor,
+    Validator,
 }
 
 impl ApiRole {
@@ -33,7 +33,7 @@ impl ApiRole {
         match self {
             ApiRole::OperatorAdmin => "operator_admin",
             ApiRole::Integration => "integration",
-            ApiRole::Conductor => "conductor",
+            ApiRole::Validator => "validator",
         }
     }
 
@@ -41,7 +41,7 @@ impl ApiRole {
         Some(match s {
             "operator_admin" => ApiRole::OperatorAdmin,
             "integration" => ApiRole::Integration,
-            "conductor" => ApiRole::Conductor,
+            "validator" => ApiRole::Validator,
             _ => return None,
         })
     }
@@ -125,7 +125,7 @@ impl FromRequestParts<AppState> for AdminAuth {
     }
 }
 
-/// Extractor for boarding devices: `conductor` or `operator_admin`.
+/// Extractor for boarding devices: `validator` or `operator_admin`.
 pub struct DeviceAuth(pub ApiKeyAuth);
 
 impl FromRequestParts<AppState> for DeviceAuth {
@@ -136,8 +136,8 @@ impl FromRequestParts<AppState> for DeviceAuth {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let auth = ApiKeyAuth::from_request_parts(parts, state).await?;
-        if !matches!(auth.role, ApiRole::Conductor | ApiRole::OperatorAdmin) {
-            return Err(ApiError::Forbidden("conductor role required"));
+        if !matches!(auth.role, ApiRole::Validator | ApiRole::OperatorAdmin) {
+            return Err(ApiError::Forbidden("validator role required"));
         }
         Ok(DeviceAuth(auth))
     }
@@ -201,7 +201,7 @@ pub async fn create_key(
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
     let role = ApiRole::parse(&req.role).ok_or_else(|| {
-        ApiError::BadRequest("role must be operator_admin, integration, or conductor".into())
+        ApiError::BadRequest("role must be operator_admin, integration, or validator".into())
     })?;
     if req.label.trim().is_empty() {
         return Err(ApiError::BadRequest("label is required".into()));

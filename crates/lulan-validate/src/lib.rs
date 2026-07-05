@@ -1,5 +1,5 @@
 //! Offline ticket verification (Phase 5). MIT-licensed and deliberately
-//! dependency-light so proprietary conductor apps can embed it; compiles
+//! dependency-light so proprietary crew and kiosk apps can embed it; compiles
 //! to wasm32 for `@lulan/validate` (browser + React Native).
 //!
 //! Pure by construction: no clock (callers pass `now_unix`), no network,

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// GET /v1/ticket-keys — every signing key's public half. Conductor
+/// GET /v1/ticket-keys — every signing key's public half. Crew
 /// devices cache this while online; validation then needs no server.
 pub async fn keys(State(state): State<AppState>) -> Result<Json<KeysResponse>, ApiError> {
     let pool = state
@@ -114,8 +114,8 @@ pub struct ScanSyncResponse {
     outcomes: Vec<ScanOutcome>,
 }
 
-/// POST /v1/scans — batched, idempotent boarding sync from conductor
-/// devices (conductor or admin API key). Safe to replay entire journals.
+/// POST /v1/scans — batched, idempotent boarding sync from validator
+/// devices (validator or admin API key). Safe to replay entire journals.
 pub async fn sync(
     State(state): State<AppState>,
     _device: crate::auth::DeviceAuth,

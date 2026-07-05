@@ -17,7 +17,7 @@ use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-const DEVICE_KEY: &str = "llk_test_conductor_key_tickets_it";
+const DEVICE_KEY: &str = "llk_test_validator_key_tickets_it";
 
 async fn call(
     app: &axum::Router,
@@ -97,7 +97,7 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     .unwrap();
 
     sqlx::query(
-        "INSERT INTO api_keys (id, key_hash, label, role) VALUES ($1, $2, 'test-conductor', 'conductor')
+        "INSERT INTO api_keys (id, key_hash, label, role) VALUES ($1, $2, 'test-validator', 'validator')
          ON CONFLICT (key_hash) DO UPDATE SET active = true",
     )
     .bind(Uuid::new_v4())
@@ -236,7 +236,7 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
             {"ticket_id": verified_ids[1], "scanned_at": scanned_at},
         ],
     });
-    // Scan sync requires a conductor credential (Phase 6).
+    // Scan sync requires a validator credential (Phase 6).
     let (status, _) = call(&app, "POST", "/v1/scans", Some(scans.clone())).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "scans need a device key");
     let (status, sync) = call_with_key(

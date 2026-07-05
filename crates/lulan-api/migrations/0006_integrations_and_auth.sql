@@ -38,7 +38,7 @@ CREATE TABLE api_keys (
     key_hash   bytea NOT NULL UNIQUE,
     label      text NOT NULL,
     role       text NOT NULL
-        CHECK (role IN ('operator_admin', 'integration', 'conductor')),
+        CHECK (role IN ('operator_admin', 'integration', 'validator')),
     active     boolean NOT NULL DEFAULT true,
     created_at timestamptz NOT NULL DEFAULT now()
 );

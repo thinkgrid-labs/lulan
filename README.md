@@ -31,7 +31,7 @@ Think "Medusa or commerce tools, but for seats, cabins, vehicle slots, and cargo
 Most transportation operators still run on legacy reservation software: expensive licenses, proprietary lock-in, monolithic deployments, and booking conflicts the moment demand spikes. General-purpose e-commerce platforms don't help — they assume inventory is static. Transit inventory isn't:
 
 ```
-A ─── B ─── C ─── D        Seat 12A on one sailing:
+A ─── B ─── C ─── D        Seat 12A on one departure:
 
 A → B   Reserved           the same physical seat is sold inventory
 B → C   Available          on one journey segment and open capacity
@@ -47,11 +47,11 @@ Selling a seat means atomically claiming a **span of segments** on a **specific 
 | **Segment-aware inventory** | Seats, cabins, vehicle decks, and cargo pools tracked per journey segment with bitmask occupancy — the PRD's "12A is free B→C but taken A→B" answered in one query. |
 | **Race-free booking at scale** | Redis-backed soft holds + guarded PostgreSQL claims. Zero double-sells at 10k concurrent contenders (chaos-tested). |
 | **Event-sourced orders** | Every order is an append-only event stream (`order_created → … → passenger_boarded`) with a transactional outbox; replaying events reproduces the read model exactly. |
-| **Multi-passenger itineraries** | One order, N passengers; per-passenger seats and fares, including legally mandated senior/PWD/child discounts (PH-market ready). |
+| **Multi-passenger itineraries** | One order, N passengers; per-passenger seats and fares, including regulated concession fares (child, senior, disability) that many markets mandate by law. |
 | **Pluggable pricing (WASM)** | Deterministic integer-only fare rules, plus operator-supplied pricing modules run in a fuel-metered, memory-capped WebAssembly sandbox with **no host imports** — measured at p95 ≈ 443 µs per quote. Native and WASM engines are property-tested to be bit-identical. |
 | **Signed quotes** | Short-TTL HMAC quote tokens: the price shown is the price charged, tamper-proof. |
-| **Offline ticket validation** | Ed25519-signed CBOR QR tickets (~245 bytes). The MIT `lulan-validate` crate verifies them with no server, no clock assumptions, and compiles to WebAssembly for browser and mobile conductor apps. |
-| **Offline boarding sync** | Conductor devices journal scans locally and sync idempotent batches when connectivity returns; duplicate and cloned-QR scans are detected and flagged. |
+| **Offline ticket validation** | Ed25519-signed CBOR QR tickets (~245 bytes). The MIT `lulan-validate` crate verifies them with no server, no clock assumptions, and compiles to WebAssembly for browser and mobile boarding apps. |
+| **Offline boarding sync** | Gate and crew devices journal scans locally and sync idempotent batches when connectivity returns; duplicate and cloned-QR scans are detected and flagged. |
 | **Headless & self-hostable** | JSON REST APIs only — bring your own storefront, kiosk, or POS. One Docker image, PostgreSQL + Redis, no per-booking fees. |
 
 ## How it works
@@ -72,16 +72,16 @@ Prerequisites: Rust (edition 2024), Docker, [`just`](https://github.com/casey/ju
 git clone https://github.com/thinkgrid-labs/lulan.git
 cd lulan
 just up      # PostgreSQL 16 + Redis 7 (Docker)
-just serve   # migrate, seed the demo ferry network, serve on :8080
+just serve   # migrate, seed a sample multi-stop network, serve on :8080
 ```
 
 Book a ticket end to end:
 
 ```bash
-# 1. Find a sailing (demo network: Batangas → Caticlan → Iloilo → Cebu)
+# 1. Find a departure (sample dataset: a 4-stop ferry line, BTG → … → CEB)
 curl "localhost:8080/v1/trips/search?origin=BTG&destination=CEB&date=$(date +%F)"
 
-# 2. Quote a senior + child itinerary
+# 2. Quote a senior + child itinerary (concession fares applied automatically)
 curl -X POST localhost:8080/v1/quotes -H 'content-type: application/json' -d '{
   "trip_id": "<trip>",
   "items": [
@@ -115,17 +115,17 @@ just loadgen 10000 0.5     # 10k contenders, 50% via holds — expect 0 double-s
 | `POST /v1/payments/fake/webhook` | Idempotent capture webhook → auto-issues tickets |
 | `GET /v1/orders/{id}/tickets` | Ed25519-signed QR ticket tokens |
 | `GET /v1/ticket-keys` | Public keys for offline validators |
-| `POST /v1/scans` | Batched, idempotent boarding-scan sync (conductor key) |
+| `POST /v1/scans` | Batched, idempotent boarding-scan sync (validator key) |
 | `GET /v1/customers/me/orders` | Authenticated customer's bookings (IdP JWT) |
 | `POST /v1/webhooks` | Register HMAC-signed webhook endpoints (admin key) |
 | `GET /metrics` | Prometheus metrics |
 
-The full surface is documented in the OpenAPI spec — committed at [`docs/openapi.json`](docs/openapi.json) and served live at `GET /openapi.json`. A typed TypeScript client ships as [`@lulan/storefront-sdk`](packages/storefront-sdk).
+The full surface is documented in the OpenAPI spec — committed at [`crates/lulan-api/openapi.json`](crates/lulan-api/openapi.json) and served live at `GET /openapi.json`. A typed TypeScript client ships as [`@lulan/storefront-sdk`](packages/storefront-sdk).
 
 ## Architecture
 
 ```
-        Your storefront / kiosk / POS / conductor app
+        Your storefront / kiosk / POS / boarding app
                           │
               JSON REST  ·  @lulan/storefront-sdk (TS)
                           │
@@ -148,7 +148,7 @@ The full surface is documented in the OpenAPI spec — committed at [`docs/opena
 
 Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/benchmarks.md):
 
-- **0 double-sells** across 10,000 simultaneous contenders on one 52-seat vessel — repeated with Redis killed mid-run (chaos test).
+- **0 double-sells** across 10,000 simultaneous contenders on one 52-seat vehicle — repeated with Redis killed mid-run (chaos test).
 - **WASM pricing**: p50 347 µs / p95 443 µs per quote including per-call instantiation (PRD target < 5 ms), enforced by a CI assertion.
 - **Ticket QR payload**: ~245 bytes signed (target < 400 bytes for low-error-correction QR).
 
@@ -168,28 +168,28 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] Idempotent booking retries + per-caller rate limiting
 - [x] OpenAPI spec (served at `/openapi.json`) + TypeScript SDK (`@lulan/storefront-sdk`)
 - [x] Prometheus `/metrics` (OTLP traces planned)
-- [ ] Reference Next.js storefront + React Native conductor app
+- [ ] Reference Next.js storefront + React Native boarding-crew app
 - [ ] `@lulan/validate` npm package (WASM build of the validator)
 
 ## Use cases
 
-Lulan models any business that reserves **capacity over space and time**: provincial bus lines, inter-island ferries and RoRo vessels, regional airlines, rail and commuter networks, shuttle and van fleets, cargo and parcel space, vehicle-deck slots, parking, and timed-entry ticketing.
+Lulan models any business that reserves **capacity over space and time**: regional and low-cost airlines, intercity and commuter bus lines, ferries and RoRo vessels, rail and metro networks, shuttle and van fleets, cargo and parcel space, vehicle-deck slots, parking, and timed-entry ticketing.
 
 ## Contributing
 
-Lulan is developed in the open and welcomes issues, design discussions, and pull requests. Start with the [development plan](docs/development-plan.md) and ADRs to understand where the project is heading. Contribution guidelines will formalise as the project approaches its first release.
+Lulan is developed in the open and welcomes issues, design discussions, and pull requests. Contribution guidelines and architecture decision records will be published as the project approaches its first release.
 
 ## License
 
 | Package | License | Why |
 |---|---|---|
 | `lulan-engine`, `lulan-api`, `lulan-pricing` (host) | **AGPL-3.0** | The core stays open — improvements to hosted deployments flow back. |
-| `lulan-validate` (offline ticket verification) | **MIT** | Embed it in proprietary conductor and kiosk apps freely. |
+| `lulan-validate` (offline ticket verification) | **MIT** | Embed it in proprietary boarding and kiosk apps freely. |
 | `lulan-pricing-guest` (reference WASM pricing module) | **MIT** | Copy it as the starting point for your own fare engine. |
 | SDKs, UI components, examples | **MIT** | Build commercial storefronts without restriction. |
 
 ---
 
-**Keywords**: open-source reservation system · headless booking engine · transit ticketing · bus booking system · ferry reservation software · seat reservation API · segment inventory · Rust booking engine · offline ticket validation · QR ticketing · WebAssembly pricing
+**Keywords**: open-source reservation system · headless booking engine · airline reservation system · bus booking system · ferry reservation software · rail ticketing · seat reservation API · segment inventory · Rust booking engine · offline ticket validation · QR ticketing · WebAssembly pricing
 
-*Lulan (Filipino/Tagalog: "to board, to load") aims to be the open-source foundation for capacity reservation — bringing modern developer tooling to an industry still dominated by legacy software. Transportation is only the beginning.*
+*Lulan aims to be the open-source foundation for capacity reservation worldwide — bringing modern developer tooling to an industry still dominated by legacy software. The name comes from the Filipino word for "to board, to load." Transportation is only the beginning.*

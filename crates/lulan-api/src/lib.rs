@@ -28,11 +28,11 @@ use state::AppState;
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// The committed OpenAPI spec (docs/openapi.json), served at
+/// The committed OpenAPI spec (crates/lulan-api/openapi.json), served at
 /// /openapi.json. Hand-authored until the API stabilises pre-v1; the
 /// `openapi_documents_only_real_routes` test keeps it from drifting off
 /// the actual router.
-pub const OPENAPI_JSON: &str = include_str!("../../../docs/openapi.json");
+pub const OPENAPI_JSON: &str = include_str!("../openapi.json");
 
 pub fn router(state: AppState) -> Router {
     Router::new()
