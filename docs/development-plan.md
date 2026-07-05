@@ -28,27 +28,31 @@ Each of these should be captured as an ADR in `docs/adr/` during Phase 0.
 
 Monorepo: Cargo workspace for the engine, pnpm workspace for the TS ecosystem.
 
+Crate count is kept deliberately low to start — splits inside a Cargo workspace are cheap to do later, so a boundary earns its own crate only when it has a hard technical reason (compilation target, licensing, or "must not link into the server"). Domain types, inventory, events, orders, and ticketing start life together in `lulan-engine`: they share transactions anyway (claims and order events commit atomically), and they can be split out once the seams prove real.
+
 ```
 lulan/
-├── Cargo.toml                    # workspace
+├── Cargo.toml                    # Rust workspace root
+├── package.json                  # pnpm workspace root
+├── Dockerfile                    # builds the lulan-api image (see "Docker packaging" below)
+├── .dockerignore                 # excludes packages/, apps/, docs/ from the build context
 ├── crates/
-│   ├── lulan-domain/             # pure domain: types, state machines, invariants (no I/O)
-│   ├── lulan-inventory/          # segment availability, holds, claims
-│   ├── lulan-events/             # event log, outbox, EventSink trait (+ redpanda feature)
+│   ├── lulan-engine/             # domain types, state machines, segment inventory,
+│   │                             #   event log/outbox, orders, ticket issuance & signing
 │   ├── lulan-pricing/            # PricingEngine trait, native + wasmtime hosts
-│   ├── lulan-ticket/             # ticket issuance, Ed25519 signing, QR payload codec
-│   ├── lulan-validate/           # offline verification core (no_std-friendly; compiles to WASM)
-│   ├── lulan-api/                # Axum HTTP layer, auth, OpenAPI (utoipa), webhooks
-│   ├── lulan-server/             # binary: wiring, config, migrations, telemetry
-│   └── lulan-loadgen/            # benchmark/load harness (goose or custom tokio)
+│   ├── lulan-validate/           # offline QR verification core — separate crate because it
+│   │                             #   compiles to WASM and is MIT-licensed (see below)
+│   ├── lulan-api/                # Axum server binary: REST, auth, OpenAPI (utoipa),
+│   │                             #   webhooks, config, migrations, telemetry
+│   └── lulan-loadgen/            # concurrency invariant checker + benchmark harness
+│                                 #   (own crate so it never links into the server)
 ├── packages/
-│   ├── sdk/                      # @lulan/storefront-sdk (generated from OpenAPI)
+│   ├── sdk/                      # @lulan/sdk — generated from OpenAPI
 │   ├── validate/                 # @lulan/validate — WASM build of lulan-validate
 │   └── ui/                       # @lulan/ui — seat map, schedule search, etc. (later)
 ├── apps/                         # reference apps (Phase 8)
 │   ├── storefront/               # Next.js
-│   ├── conductor/                # React Native / Expo
-│   └── admin/
+│   └── conductor/                # React Native / Expo
 ├── deploy/
 │   ├── compose/                  # docker-compose for small operators + dev
 │   └── k8s/                      # Helm chart (later)
@@ -56,11 +60,40 @@ lulan/
 │   ├── PRD.md
 │   ├── development-plan.md
 │   └── adr/
-├── LICENSE-AGPL                  # crates/ + server
-└── LICENSE-MIT                   # packages/, apps/, deploy/, docs
+├── LICENSE-AGPL                  # crates/ (except lulan-validate)
+└── LICENSE-MIT                   # lulan-validate, packages/, apps/, deploy/, docs
 ```
 
-Licensing boundary (PRD §18) maps cleanly to directories: everything under `crates/` is AGPL-3.0, everything under `packages/` and `apps/` is MIT. **Exception:** `lulan-validate` must be dual-licensed or MIT — an AGPL core inside `@lulan/validate` would virally capture every proprietary conductor app that embeds it, which contradicts PRD §18's intent for client libraries.
+Likely later splits (when warranted, not before): `lulan-domain` out of `lulan-engine` once a second consumer needs pure types without sqlx; `lulan-events` once the Redpanda sink lands.
+
+Licensing boundary (PRD §18) maps cleanly to directories: everything under `crates/` is AGPL-3.0, everything under `packages/` and `apps/` is MIT. **Exception:** `lulan-validate` must be MIT (or dual-licensed) — an AGPL core inside `@lulan/validate` would virally capture every proprietary conductor app that embeds it, which contradicts PRD §18's intent for client libraries. This licensing exception is one of the two reasons it is a separate crate.
+
+### Docker packaging
+
+One image is shipped: **`lulan-api`**. The build context is the workspace root — `lulan-api` path-depends on `lulan-engine`, `lulan-pricing`, and `lulan-validate`, so the builder stage needs all of `crates/` plus the root `Cargo.toml`/`Cargo.lock` to compile — but only the API binary is built and only it lands in the final image:
+
+```dockerfile
+# builder: full workspace context, single -p target
+FROM rust:1-bookworm AS chef        # cargo-chef for dependency layer caching
+# ... chef prepare / chef cook ...
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+RUN cargo build --release -p lulan-api
+
+# runtime: just the binary + migrations
+FROM debian:bookworm-slim           # or gcr.io/distroless/cc
+COPY --from=builder /app/target/release/lulan-api /usr/local/bin/
+EXPOSE 8080
+ENTRYPOINT ["lulan-api"]
+```
+
+Key points:
+
+- `.dockerignore` excludes `packages/`, `apps/`, `docs/`, `target/`, `node_modules/` — the TS ecosystem never enters the engine's build context, keeping builds fast and the image honest about what it contains.
+- `cargo build -p lulan-api` compiles only the API binary and its dependency graph; `lulan-loadgen` is skipped even though it's in the context.
+- Dependency caching via `cargo-chef` (or `--mount=type=cache` on the cargo registry/target dirs) so schedule-of-day rebuilds don't recompile the world.
+- WASM pricing modules are **runtime artifacts, not image layers** — loaded from a mounted volume/object store path, so operators update pricing without rebuilding the image (this is the PRD's "instant pricing updates" claim in deployment terms).
+- Reference apps (`apps/storefront`, `apps/conductor`) get their own Dockerfiles in their own directories in Phase 8, if and when they're deployed; they are consumers of the API image, never part of it.
 
 ---
 
@@ -72,6 +105,7 @@ Licensing boundary (PRD §18) maps cleanly to directories: everything under `cra
 
 - Cargo + pnpm workspace scaffolding as above; `rust-toolchain.toml`, `.editorconfig`, `justfile` (or `cargo xtask`) for dev commands.
 - `deploy/compose/dev.yml`: Postgres 16, Redis 7. That's the whole dev stack (per D1/D2).
+- Root `Dockerfile` + `.dockerignore` per the Docker packaging section above; CI builds the image so it never rots.
 - CI (GitHub Actions): fmt + clippy (`-D warnings`) + test + `sqlx prepare` check; pnpm build/typecheck; license-header check per directory.
 - ADRs 0001–0005 covering D1–D5.
 - CONTRIBUTING.md, dual-license notices, issue templates.
@@ -84,14 +118,14 @@ Licensing boundary (PRD §18) maps cleanly to directories: everything under `cra
 
 **Goal:** correctly answer "is seat 12A available from B→C on trip T?" — the query every other feature depends on.
 
-**Domain entities** (`lulan-domain`):
+**Domain entities** (`lulan-engine::domain`):
 
 - `Location` (stop/port/airport), `Route` (ordered locations), `TripPattern`, `Trip` (dated instance of a pattern).
 - `Segment` = consecutive location pair within a trip; a passenger journey is a **span** of segments `[from_idx, to_idx)`.
 - `Resource` (vehicle/vessel with a layout), `CapacityUnit` — the generic reservable thing (D5): a `Seat` (identity-based, spatial) or a `CapacityPool` (count/weight-based: cargo kg, vehicle deck slots, standing room). Ancillaries (meals, priority boarding) are pools too.
 - `Hold`, `Claim`, `Order`, `Ticket` as distinct concepts (defined here, implemented in later phases).
 
-**Segment availability representation** (`lulan-inventory`):
+**Segment availability representation** (`lulan-engine::inventory`):
 
 - Per `(trip, capacity_unit)`, occupancy is a **segment bitmask** (`u64` covers 64 segments — more than any real-world trip; enforce a limit and document it). Seat 12A occupied A→B and C→D on a 3-segment trip = `0b101`.
 - Availability check = `mask & span_mask == 0`. This makes the PRD §2 example a one-line AND.
@@ -127,9 +161,9 @@ Licensing boundary (PRD §18) maps cleanly to directories: everything under `cra
 
 **Goal:** the order lifecycle state machine with an immutable audit trail.
 
-- `lulan-events`: append-only `events` table — `(sequence bigserial, stream_id, stream_seq, event_type, payload jsonb, occurred_at)`, unique `(stream_id, stream_seq)` for optimistic concurrency. **Insert-only enforced in Postgres** (`REVOKE UPDATE, DELETE` + trigger), since immutability is a PRD security claim (§10).
+- `lulan-engine::events`: append-only `events` table — `(sequence bigserial, stream_id, stream_seq, event_type, payload jsonb, occurred_at)`, unique `(stream_id, stream_seq)` for optimistic concurrency. **Insert-only enforced in Postgres** (`REVOKE UPDATE, DELETE` + trigger), since immutability is a PRD security claim (§10).
 - Transactional outbox + relay task; `EventSink` trait with `WebhookSink` (Phase 5) and feature-gated `RedpandaSink` (post-v1 or stretch).
-- Order state machine in `lulan-domain` as a typed transition function (`Draft → Locked → PendingPayment → Paid → Ticketed → Boarded → Completed`, plus `Cancelled`/`Expired`/`Refunded`); illegal transitions unrepresentable, every legal transition emits exactly one event. Claims from Phase 2 are executed *in the same transaction* as the `SeatLocked`/order events — one transaction, one truth.
+- Order state machine in `lulan-engine::domain` as a typed transition function (`Draft → Locked → PendingPayment → Paid → Ticketed → Boarded → Completed`, plus `Cancelled`/`Expired`/`Refunded`); illegal transitions unrepresentable, every legal transition emits exactly one event. Claims from Phase 2 are executed *in the same transaction* as the `SeatLocked`/order events — one transaction, one truth.
 - **Payments as a port, not a feature:** `PaymentProvider` trait with intent/authorize/capture/refund + webhook reconciliation; ship a `FakeProvider` (dev) and one real adapter (suggest Stripe first; a PH-relevant one like Xendit/PayMongo as a fast follow given the target market). Reconciliation job for the PRD's "failed payment reconciliation" pain point.
 
 **Exit criteria:** full lifecycle drivable via API against FakeProvider; event log replays to identical read-model state; payment webhook out-of-order/duplicate delivery handled idempotently.
@@ -154,7 +188,7 @@ Licensing boundary (PRD §18) maps cleanly to directories: everything under `cra
 
 **Goal:** the ground-staff story — boarding continues with zero connectivity.
 
-- `lulan-ticket`: on `Paid → Ticketed`, issue ticket with **Ed25519-signed compact payload** (CBOR or CWT-style: ticket id, trip, unit/span, passenger hash, fare class, validity window, key id, signature) → QR. Target < ~400 bytes for low-error-correction QR scanning on cheap devices.
+- `lulan-engine::ticket`: on `Paid → Ticketed`, issue ticket with **Ed25519-signed compact payload** (CBOR or CWT-style: ticket id, trip, unit/span, passenger hash, fare class, validity window, key id, signature) → QR. Target < ~400 bytes for low-error-correction QR scanning on cheap devices.
 - Key management: rotating keypairs, `kid` in payload, JWKS-style public-key distribution endpoint; devices cache keysets.
 - `lulan-validate`: **pure Rust verification core** (signature check, validity window, trip match) with no server dependency — compiled to WASM for `@lulan/validate` (browser + RN) and usable natively. One verification implementation everywhere.
 - Offline replay prevention (per PRD §10, honestly scoped): a signature can't stop a *cloned* QR across two offline devices — that's physics. Mitigations: device-local seen-set (rejects re-scan on same device), scan-event journal synced when connectivity returns, server-side conflict detection flags duplicates post-hoc. Document this threat model explicitly.
