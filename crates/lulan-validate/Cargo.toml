@@ -1,0 +1,9 @@
+[package]
+name = "lulan-validate"
+description = "Lulan offline ticket verification core; compiles to WASM for @lulan/validate"
+license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true

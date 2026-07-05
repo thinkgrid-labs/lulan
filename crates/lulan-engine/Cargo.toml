@@ -1,0 +1,20 @@
+[package]
+name = "lulan-engine"
+description = "Lulan core engine: domain model, segment inventory, events, orders, ticketing"
+license = "AGPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+redis = { workspace = true }
+serde = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

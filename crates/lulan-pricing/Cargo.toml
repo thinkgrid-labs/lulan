@@ -1,0 +1,14 @@
+[package]
+name = "lulan-pricing"
+description = "Lulan pricing: PricingEngine trait with native and WASM (wasmtime) implementations"
+license = "AGPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+lulan-engine = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
