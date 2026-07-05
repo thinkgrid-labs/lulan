@@ -3,7 +3,8 @@
 //! sync devices upload when connectivity returns.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use lulan_engine::ticket::{IssuedTicket, PublicKeyEntry, ScanOutcome, TicketError, TicketStore};
 use serde::{Deserialize, Serialize};
@@ -38,15 +39,19 @@ pub struct TicketsResponse {
 
 /// POST /v1/orders/{order_id}/tickets — issue (idempotent) and return.
 /// Normally tickets are issued automatically on payment capture; this is
-/// the retry path and the fetch-with-issue for clients.
+/// the retry path and the fetch-with-issue for clients. Tickets are
+/// boarding passes: reads are gated like the order itself.
 pub async fn issue(
     State(state): State<AppState>,
     Path(order_id): Path<Uuid>,
+    Query(params): Query<crate::orders::GetOrderParams>,
+    headers: HeaderMap,
 ) -> Result<Json<TicketsResponse>, ApiError> {
     let pool = state
         .db
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
+    crate::orders::authorize_order_read(&state, &headers, order_id, params.token()).await?;
     let signer = state
         .ticket_signer
         .as_ref()
@@ -70,11 +75,14 @@ pub async fn issue(
 pub async fn list(
     State(state): State<AppState>,
     Path(order_id): Path<Uuid>,
+    Query(params): Query<crate::orders::GetOrderParams>,
+    headers: HeaderMap,
 ) -> Result<Json<TicketsResponse>, ApiError> {
     let pool = state
         .db
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
+    crate::orders::authorize_order_read(&state, &headers, order_id, params.token()).await?;
     let tickets = TicketStore::new(pool.clone())
         .tickets_for_order(order_id)
         .await
@@ -107,9 +115,10 @@ pub struct ScanSyncResponse {
 }
 
 /// POST /v1/scans — batched, idempotent boarding sync from conductor
-/// devices. Safe to replay entire journals.
+/// devices (conductor or admin API key). Safe to replay entire journals.
 pub async fn sync(
     State(state): State<AppState>,
+    _device: crate::auth::DeviceAuth,
     Json(req): Json<ScanSyncRequest>,
 ) -> Result<Json<ScanSyncResponse>, ApiError> {
     if req.device_id.trim().is_empty() {

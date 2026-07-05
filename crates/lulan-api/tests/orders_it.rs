@@ -42,6 +42,7 @@ async fn setup(offset: i64) -> Option<(PgPool, Uuid, axum::Router)> {
         "DELETE FROM tickets WHERE trip_id = $1",
         "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
         "DELETE FROM passengers WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
+        "DELETE FROM idempotency_keys WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
         "DELETE FROM orders WHERE trip_id = $1",
     ] {
         sqlx::query(sql).bind(trip_id).execute(&pool).await.unwrap();
@@ -123,6 +124,7 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
                 {"full_name": "Maria Santos", "type": "adult"},
                 {"full_name": "Jose Santos", "type": "senior", "birthdate": "1958-03-14"},
             ],
+            "guest_contact": "maria@example.com",
             "items": [
                 {"unit_code": "5A", "origin": "BTG", "destination": "CEB", "passenger": 0},
                 {"unit_code": "5B", "origin": "BTG", "destination": "CEB", "passenger": 1},
@@ -160,6 +162,8 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     );
     assert_eq!(order["passengers"].as_array().unwrap().len(), 2);
     let order_id = order["order_id"].as_str().unwrap().to_string();
+    // Phase 6: order reads are gated; guests keep the retrieval token.
+    let retrieval = order["retrieval_token"].as_str().unwrap().to_string();
 
     // The claims are visible in availability immediately.
     let (_, avail) = request(
@@ -232,7 +236,15 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     assert_eq!(status, StatusCode::CONFLICT);
 
     // Read model shows the full event trail, exactly once per transition.
-    let (_, details) = request(&app, "GET", &format!("/v1/orders/{order_id}"), None).await;
+    let (status, _) = request(&app, "GET", &format!("/v1/orders/{order_id}"), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "gated without a token");
+    let (_, details) = request(
+        &app,
+        "GET",
+        &format!("/v1/orders/{order_id}?token={retrieval}"),
+        None,
+    )
+    .await;
     let event_types: Vec<&str> = details["events"]
         .as_array()
         .unwrap()
@@ -274,7 +286,7 @@ async fn conflicting_order_rolls_back_completely() {
         "POST",
         "/v1/orders",
         Some(json!({
-            "trip_id": trip_id, "passengers": [{"full_name": "A Test", "type": "adult"}],
+            "trip_id": trip_id, "passengers": [{"full_name": "A Test", "type": "adult"}], "guest_contact": "test@example.com",
             "items": [{"unit_code": "6A", "origin": "BTG", "destination": "CEB"}],
         })),
     )
@@ -292,7 +304,7 @@ async fn conflicting_order_rolls_back_completely() {
         "POST",
         "/v1/orders",
         Some(json!({
-            "trip_id": trip_id, "passengers": [{"full_name": "B Test", "type": "adult"}],
+            "trip_id": trip_id, "passengers": [{"full_name": "B Test", "type": "adult"}], "guest_contact": "test@example.com",
             "items": [
                 {"unit_code": "6B", "origin": "BTG", "destination": "CEB"},
                 {"unit_code": "6A", "origin": "CTC", "destination": "CEB"},
@@ -334,7 +346,7 @@ async fn cancel_and_expiry_release_inventory() {
         "POST",
         "/v1/orders",
         Some(json!({
-            "trip_id": trip_id, "passengers": [{"full_name": "C Test", "type": "adult"}],
+            "trip_id": trip_id, "passengers": [{"full_name": "C Test", "type": "adult"}], "guest_contact": "test@example.com",
             "items": [
                 {"unit_code": "7A", "origin": "BTG", "destination": "ILO"},
                 {"unit_code": "VEHICLE_DECK", "origin": "BTG", "destination": "ILO", "quantity": 2},
@@ -374,12 +386,13 @@ async fn cancel_and_expiry_release_inventory() {
         "POST",
         "/v1/orders",
         Some(json!({
-            "trip_id": trip_id, "passengers": [{"full_name": "D Test", "type": "adult"}],
+            "trip_id": trip_id, "passengers": [{"full_name": "D Test", "type": "adult"}], "guest_contact": "test@example.com",
             "items": [{"unit_code": "8A", "origin": "BTG", "destination": "CEB"}],
         })),
     )
     .await;
     let order_id = order["order_id"].as_str().unwrap();
+    let retrieval = order["retrieval_token"].as_str().unwrap();
     sqlx::query("UPDATE orders SET expires_at = now() - interval '1 minute' WHERE id = $1")
         .bind(Uuid::parse_str(order_id).unwrap())
         .execute(&pool)
@@ -390,7 +403,13 @@ async fn cancel_and_expiry_release_inventory() {
     let expired = store.expire_due().await.unwrap();
     assert!(expired >= 1);
 
-    let (_, details) = request(&app, "GET", &format!("/v1/orders/{order_id}"), None).await;
+    let (_, details) = request(
+        &app,
+        "GET",
+        &format!("/v1/orders/{order_id}?token={retrieval}"),
+        None,
+    )
+    .await;
     assert_eq!(details["status"], "expired");
     let (_, avail) = request(
         &app,

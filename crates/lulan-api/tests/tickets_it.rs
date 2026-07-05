@@ -17,13 +17,28 @@ use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+const DEVICE_KEY: &str = "llk_test_conductor_key_tickets_it";
+
 async fn call(
     app: &axum::Router,
     method: &str,
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    call_with_key(app, method, uri, body, None).await
+}
+
+async fn call_with_key(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    api_key: Option<&str>,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(key) = api_key {
+        builder = builder.header("x-api-key", key);
+    }
     let body = match body {
         Some(v) => {
             builder = builder.header("content-type", "application/json");
@@ -44,6 +59,10 @@ async fn call(
         status,
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
+}
+
+async fn call_with_key2(app: &axum::Router, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+    call_with_key(app, "POST", uri, body, Some(DEVICE_KEY)).await
 }
 
 #[tokio::test]
@@ -77,6 +96,16 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     .await
     .unwrap();
 
+    sqlx::query(
+        "INSERT INTO api_keys (id, key_hash, label, role) VALUES ($1, $2, 'test-conductor', 'conductor')
+         ON CONFLICT (key_hash) DO UPDATE SET active = true",
+    )
+    .bind(Uuid::new_v4())
+    .bind(lulan_api::auth::hash_key(DEVICE_KEY))
+    .execute(&pool)
+    .await
+    .unwrap();
+
     let app = lulan_api::router(AppState::new(Some(pool.clone()), None).await);
 
     // Book two passengers.
@@ -90,6 +119,7 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
                 {"full_name": "Ana Reyes", "type": "adult"},
                 {"full_name": "Lola Remedios", "type": "senior", "birthdate": "1950-01-02"},
             ],
+            "guest_contact": "ana@example.com",
             "items": [
                 {"unit_code": "13A", "origin": "BTG", "destination": "CEB", "passenger": 0},
                 {"unit_code": "13B", "origin": "BTG", "destination": "CEB", "passenger": 1},
@@ -99,16 +129,20 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     .await;
     assert_eq!(status, StatusCode::CREATED, "{order}");
     let order_id = order["order_id"].as_str().unwrap().to_string();
+    let retrieval = order["retrieval_token"].as_str().unwrap().to_string();
 
     // Tickets before payment must be refused.
     let (status, _) = call(
         &app,
         "POST",
-        &format!("/v1/orders/{order_id}/tickets"),
+        &format!("/v1/orders/{order_id}/tickets?token={retrieval}"),
         Some(json!({})),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "no tickets before payment");
+    // Phase 6: without any credential, ticket reads are refused outright.
+    let (status, _) = call(&app, "GET", &format!("/v1/orders/{order_id}/tickets"), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Pay: webhook capture auto-issues tickets.
     let (_, payment) = call(
@@ -129,15 +163,20 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     assert_eq!(hook["order_status"], "ticketed");
 
     // Fetch tickets; issuing again is idempotent (same 2 tickets).
-    let (status, tickets) =
-        call(&app, "GET", &format!("/v1/orders/{order_id}/tickets"), None).await;
+    let (status, tickets) = call(
+        &app,
+        "GET",
+        &format!("/v1/orders/{order_id}/tickets?token={retrieval}"),
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let tickets = tickets["tickets"].as_array().unwrap().clone();
     assert_eq!(tickets.len(), 2, "one ticket per passenger");
     let (_, reissued) = call(
         &app,
         "POST",
-        &format!("/v1/orders/{order_id}/tickets"),
+        &format!("/v1/orders/{order_id}/tickets?token={retrieval}"),
         Some(json!({})),
     )
     .await;
@@ -197,7 +236,17 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
             {"ticket_id": verified_ids[1], "scanned_at": scanned_at},
         ],
     });
-    let (status, sync) = call(&app, "POST", "/v1/scans", Some(scans.clone())).await;
+    // Scan sync requires a conductor credential (Phase 6).
+    let (status, _) = call(&app, "POST", "/v1/scans", Some(scans.clone())).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "scans need a device key");
+    let (status, sync) = call_with_key(
+        &app,
+        "POST",
+        "/v1/scans",
+        Some(scans.clone()),
+        Some(DEVICE_KEY),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{sync}");
     let outcomes = sync["outcomes"].as_array().unwrap();
     assert_eq!(outcomes[0]["status"], "boarded");
@@ -209,16 +258,15 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     );
 
     // Whole-batch replay (device re-uploads its journal): all no-ops.
-    let (_, resync) = call(&app, "POST", "/v1/scans", Some(scans)).await;
+    let (_, resync) = call_with_key(&app, "POST", "/v1/scans", Some(scans), Some(DEVICE_KEY)).await;
     for outcome in resync["outcomes"].as_array().unwrap() {
         assert_eq!(outcome["status"], "duplicate_scan");
     }
 
     // Cloned-QR case: a DIFFERENT device scans an already-boarded ticket —
     // recorded as evidence, flagged as already boarded.
-    let (_, clone_scan) = call(
+    let (_, clone_scan) = call_with_key2(
         &app,
-        "POST",
         "/v1/scans",
         Some(json!({
             "device_id": "gate-2",
@@ -229,7 +277,13 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     assert_eq!(clone_scan["outcomes"][0]["status"], "already_boarded");
 
     // Order read model + replayed stream both say Boarded.
-    let (_, details) = call(&app, "GET", &format!("/v1/orders/{order_id}"), None).await;
+    let (_, details) = call(
+        &app,
+        "GET",
+        &format!("/v1/orders/{order_id}?token={retrieval}"),
+        None,
+    )
+    .await;
     assert_eq!(details["status"], "boarded");
     let store = lulan_engine::orders::OrderStore::new(pool.clone());
     assert_eq!(
@@ -242,9 +296,8 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     );
 
     // Unknown ticket ids don't poison a batch.
-    let (_, unknown) = call(
+    let (_, unknown) = call_with_key2(
         &app,
-        "POST",
         "/v1/scans",
         Some(json!({
             "device_id": "gate-1",

@@ -7,8 +7,11 @@ use serde_json::json;
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(String),
+    Unauthorized(&'static str),
+    Forbidden(&'static str),
     NotFound(String),
     Conflict(String),
+    TooManyRequests,
     ServiceUnavailable(&'static str),
     Internal(anyhow::Error),
 }
@@ -17,8 +20,14 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            ApiError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.to_string()),
+            ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.to_string()),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            ApiError::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate limit exceeded".to_string(),
+            ),
             ApiError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.to_string()),
             ApiError::Internal(err) => {
                 tracing::error!(error = ?err, "internal error");

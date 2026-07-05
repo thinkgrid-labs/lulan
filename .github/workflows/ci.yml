@@ -54,6 +54,19 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Typecheck @lulan/storefront-sdk
+        working-directory: packages/storefront-sdk
+        run: |
+          npm install --no-audit --no-fund
+          npm run typecheck
+
   docker:
     runs-on: ubuntu-latest
     steps:

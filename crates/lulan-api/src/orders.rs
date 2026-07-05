@@ -3,8 +3,8 @@
 //! auto-issues tickets on capture), cancel, fetch.
 
 use axum::Json;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use chrono::NaiveDate;
 use lulan_engine::domain::{OrderStatus, PassengerType};
 use lulan_engine::events::StoredEvent;
@@ -26,6 +26,10 @@ pub struct CreateOrderRequest {
     trip_id: Uuid,
     /// The travelling party; passengers[0] is the lead/contact.
     passengers: Vec<PassengerRequest>,
+    /// Guest checkout contact (email or phone). Required unless the
+    /// request carries a customer bearer token.
+    #[serde(default)]
+    guest_contact: Option<String>,
     /// Buy at previously quoted prices (see POST /v1/quotes). Without it,
     /// items are priced live at order time.
     #[serde(default)]
@@ -34,6 +38,17 @@ pub struct CreateOrderRequest {
     #[serde(default)]
     promo_code: Option<String>,
     items: Vec<OrderItemRequest>,
+}
+
+/// The created order plus its retrieval credential: guests keep the
+/// token (magic-link semantics); customers can also list via
+/// `/v1/customers/me/orders`.
+#[derive(Serialize)]
+pub struct CreateOrderResponse {
+    #[serde(flatten)]
+    record: OrderRecord,
+    retrieval_token: String,
+    customer_id: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -61,11 +76,13 @@ pub struct OrderItemRequest {
 }
 
 /// POST /v1/orders — prices, then claims all items and creates the order
-/// atomically.
+/// atomically. Supports `Idempotency-Key` (the stored 201 is replayed for
+/// retries) and either a customer bearer token or guest checkout.
 pub async fn create(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateOrderRequest>,
-) -> Result<(StatusCode, Json<OrderRecord>), ApiError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     if req.items.is_empty() {
         return Err(ApiError::BadRequest("order needs at least one item".into()));
     }
@@ -76,6 +93,43 @@ pub async fn create(
     }
     let orders = state.orders()?;
     let inventory = state.inventory()?;
+    let pool = state.db.as_ref().expect("orders() guaranteed db");
+
+    // Booking retries must not double-book: replay the stored response.
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    if let Some(key) = &idempotency_key {
+        let stored: Option<(i32, serde_json::Value)> =
+            sqlx::query_as("SELECT status_code, response FROM idempotency_keys WHERE key = $1")
+                .bind(key)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| ApiError::Internal(e.into()))?;
+        if let Some((status, response)) = stored {
+            return Ok((
+                StatusCode::from_u16(status as u16).unwrap_or(StatusCode::OK),
+                Json(response),
+            ));
+        }
+    }
+
+    // Identity: a customer bearer token, or guest checkout with contact.
+    let customer_id = match crate::identity::bearer_subject(&state, &headers) {
+        Some(subject) => Some(
+            crate::identity::upsert_customer(pool, &subject)
+                .await
+                .map_err(|e| ApiError::Internal(e.into()))?,
+        ),
+        None => None,
+    };
+    let guest_contact = req.guest_contact.as_deref().map(str::trim);
+    if customer_id.is_none() && guest_contact.is_none_or(str::is_empty) {
+        return Err(ApiError::BadRequest(
+            "guest orders need guest_contact (email or phone) for retrieval".into(),
+        ));
+    }
 
     let mut passengers = Vec::with_capacity(req.passengers.len());
     for p in &req.passengers {
@@ -196,13 +250,45 @@ pub async fn create(
 
     match orders.create(req.trip_id, &passengers, &items).await? {
         CreateOutcome::Created(record) => {
+            // Attach ownership/contact (created in the same request, so
+            // visible before the response ever leaves).
+            sqlx::query("UPDATE orders SET customer_id = $2, guest_contact = $3 WHERE id = $1")
+                .bind(record.order_id)
+                .bind(customer_id)
+                .bind(guest_contact)
+                .execute(pool)
+                .await
+                .map_err(|e| ApiError::Internal(e.into()))?;
+
             // Consumed holds have served their purpose; best-effort cleanup.
             if let Ok(holds) = state.holds() {
                 for hold_id in req.items.iter().filter_map(|i| i.hold_id) {
                     let _ = holds.release(hold_id).await;
                 }
             }
-            Ok((StatusCode::CREATED, Json(record)))
+
+            let response = CreateOrderResponse {
+                retrieval_token: crate::identity::retrieval_token(
+                    &state.quote_secret,
+                    record.order_id,
+                ),
+                customer_id,
+                record,
+            };
+            let body = serde_json::to_value(&response).map_err(|e| ApiError::Internal(e.into()))?;
+            if let Some(key) = &idempotency_key {
+                sqlx::query(
+                    "INSERT INTO idempotency_keys (key, order_id, status_code, response)
+                     VALUES ($1, $2, 201, $3) ON CONFLICT (key) DO NOTHING",
+                )
+                .bind(key)
+                .bind(response.record.order_id)
+                .bind(&body)
+                .execute(pool)
+                .await
+                .map_err(|e| ApiError::Internal(e.into()))?;
+            }
+            Ok((StatusCode::CREATED, Json(body)))
         }
         CreateOutcome::Conflict { unit_code } => Err(ApiError::Conflict(format!(
             "{unit_code} is no longer available for the requested span"
@@ -230,6 +316,71 @@ pub struct OrderDetails {
     events: Vec<EventSummary>,
 }
 
+#[derive(Deserialize)]
+pub struct GetOrderParams {
+    /// Guest retrieval token issued at creation.
+    #[serde(default)]
+    token: Option<String>,
+}
+
+impl GetOrderParams {
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+}
+
+/// Order reads are gated: retrieval token, owning customer, or an API
+/// key. Public order enumeration was fine for a demo, not for PII.
+pub(crate) async fn authorize_order_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    order_id: Uuid,
+    token: Option<&str>,
+) -> Result<(), ApiError> {
+    if let Some(token) = token
+        && crate::identity::verify_retrieval_token(&state.quote_secret, order_id, token)
+    {
+        return Ok(());
+    }
+    let pool = state.db.as_ref().expect("callers check db");
+    // Owning customer?
+    if let Some(subject) = crate::identity::bearer_subject(state, headers)
+        && let Some(customer_id) = crate::identity::find_customer(pool, &subject)
+            .await
+            .map_err(|e| ApiError::Internal(e.into()))?
+    {
+        let owns: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM orders WHERE id = $1 AND customer_id = $2")
+                .bind(order_id)
+                .bind(customer_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| ApiError::Internal(e.into()))?;
+        if owns.is_some() {
+            return Ok(());
+        }
+    }
+    // Server-to-server credential?
+    if let Some(value) = headers
+        .get("x-api-key")
+        .or_else(|| headers.get("authorization"))
+        && let Ok(raw) = value.to_str()
+    {
+        let key = raw.strip_prefix("Bearer ").unwrap_or(raw);
+        if key.starts_with("llk_")
+            && crate::auth::authenticate(pool, key)
+                .await
+                .map_err(|e| ApiError::Internal(e.into()))?
+                .is_some()
+        {
+            return Ok(());
+        }
+    }
+    Err(ApiError::Unauthorized(
+        "provide the order's retrieval token, the owning customer's bearer token, or an API key",
+    ))
+}
+
 #[derive(Serialize)]
 pub struct EventSummary {
     stream_seq: i32,
@@ -241,8 +392,11 @@ pub struct EventSummary {
 pub async fn get(
     State(state): State<AppState>,
     Path(order_id): Path<Uuid>,
+    Query(params): Query<GetOrderParams>,
+    headers: HeaderMap,
 ) -> Result<Json<OrderDetails>, ApiError> {
     let orders = state.orders()?;
+    authorize_order_read(&state, &headers, order_id, params.token.as_deref()).await?;
     let record = orders
         .get(order_id)
         .await?

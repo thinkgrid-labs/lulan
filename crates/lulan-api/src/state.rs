@@ -25,6 +25,9 @@ pub struct AppState {
     /// Ed25519 ticket signer, loaded/created at boot when a database is
     /// configured. None = ticket issuance returns 503.
     pub ticket_signer: Option<Arc<lulan_engine::ticket::TicketSigner>>,
+    /// Customer identity port (operator's IdP). None = guest checkout
+    /// only; customer endpoints return 401.
+    pub identity: Option<Arc<dyn crate::identity::IdentityProvider>>,
 }
 
 impl AppState {
@@ -42,12 +45,16 @@ impl AppState {
             },
             None => None,
         };
+        let identity: Option<Arc<dyn crate::identity::IdentityProvider>> =
+            crate::identity::HsJwtIdentity::from_env()
+                .map(|provider| Arc::new(provider) as Arc<dyn crate::identity::IdentityProvider>);
         Self {
             db,
             redis,
             pricing: Arc::new(NativeEngine),
             quote_secret: Arc::new(ephemeral_secret()),
             ticket_signer,
+            identity,
         }
     }
 

@@ -1,13 +1,13 @@
-# Lulan — Open-Source Headless Reservation Engine for Transit & Capacity Booking
+# Lulan — Open-Source Headless Reservation Engine for Modern Transit & Capacity Booking
 
 [![CI](https://github.com/thinkgrid-labs/lulan/actions/workflows/ci.yml/badge.svg)](https://github.com/thinkgrid-labs/lulan/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/core-AGPL--3.0-blue.svg)](LICENSE)
 [![SDKs: MIT](https://img.shields.io/badge/SDKs%20%26%20validators-MIT-green.svg)](#license)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-**Lulan is an open-source, API-first reservation system for buses, ferries, rail, and any operator that sells capacity instead of products.** It is a headless booking engine written in Rust: segment-aware seat inventory, race-free reservations under high concurrency, event-sourced order lifecycle, a sandboxed WebAssembly pricing engine, and cryptographically signed QR tickets that validate **fully offline**.
+**Lulan is an open-source, API-first reservation system for airlines, buses, ferries, rail, and any operator that sells capacity instead of products.** It is a headless booking engine written in Rust: segment-aware seat inventory, race-free reservations under high concurrency, event-sourced order lifecycle, a sandboxed WebAssembly pricing engine, and cryptographically signed QR tickets that validate **fully offline**.
 
-Think "Medusa or commercetools, but for seats, cabins, vehicle slots, and cargo holds" — inventory that exists in **space and time**, not on a shelf.
+Think "Medusa or commerce tools, but for seats, cabins, vehicle slots, and cargo holds" — inventory that exists in **space and time**, not on a shelf.
 
 ---
 
@@ -115,16 +115,19 @@ just loadgen 10000 0.5     # 10k contenders, 50% via holds — expect 0 double-s
 | `POST /v1/payments/fake/webhook` | Idempotent capture webhook → auto-issues tickets |
 | `GET /v1/orders/{id}/tickets` | Ed25519-signed QR ticket tokens |
 | `GET /v1/ticket-keys` | Public keys for offline validators |
-| `POST /v1/scans` | Batched, idempotent boarding-scan sync |
+| `POST /v1/scans` | Batched, idempotent boarding-scan sync (conductor key) |
+| `GET /v1/customers/me/orders` | Authenticated customer's bookings (IdP JWT) |
+| `POST /v1/webhooks` | Register HMAC-signed webhook endpoints (admin key) |
+| `GET /metrics` | Prometheus metrics |
 
-OpenAPI spec and a generated TypeScript SDK are next on the roadmap (Phase 6).
+The full surface is documented in the OpenAPI spec — committed at [`docs/openapi.json`](docs/openapi.json) and served live at `GET /openapi.json`. A typed TypeScript client ships as [`@lulan/storefront-sdk`](packages/storefront-sdk).
 
 ## Architecture
 
 ```
         Your storefront / kiosk / POS / conductor app
                           │
-              JSON REST  (TypeScript SDK planned)
+              JSON REST  ·  @lulan/storefront-sdk (TS)
                           │
                 ┌─────────▼──────────┐
                 │     lulan-api      │  Axum · HTTP/2
@@ -140,8 +143,6 @@ OpenAPI spec and a generated TypeScript SDK are next on the roadmap (Phase 6).
    Offline edge:  lulan-validate (MIT, wasm32) verifies tickets
                   with zero server dependency.
 ```
-
-Design decisions are documented as ADRs in [`docs/adr/`](docs/adr/) — including why the event log lives in PostgreSQL rather than Kafka, why claims are guarded SQL updates rather than Redis locks, and why pricing is a trait first and WASM second. The full build plan lives in [`docs/development-plan.md`](docs/development-plan.md).
 
 ## Benchmarks
 
@@ -162,10 +163,11 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] Multi-passenger orders with passenger-type fares
 - [x] Ed25519 QR ticketing + offline validation (`lulan-validate`)
 - [x] Offline boarding-scan sync with replay/clone detection
-- [ ] Webhooks for operator integrations
-- [ ] Authentication: API keys, identity-provider port, guest checkout
-- [ ] OpenAPI spec + generated TypeScript SDK (`@lulan/storefront-sdk`)
-- [ ] Observability: OpenTelemetry traces, Prometheus metrics
+- [x] Webhooks: HMAC-signed deliveries with durable retries
+- [x] Authentication: API keys + roles, identity-provider port, guest checkout with retrieval tokens
+- [x] Idempotent booking retries + per-caller rate limiting
+- [x] OpenAPI spec (served at `/openapi.json`) + TypeScript SDK (`@lulan/storefront-sdk`)
+- [x] Prometheus `/metrics` (OTLP traces planned)
 - [ ] Reference Next.js storefront + React Native conductor app
 - [ ] `@lulan/validate` npm package (WASM build of the validator)
 

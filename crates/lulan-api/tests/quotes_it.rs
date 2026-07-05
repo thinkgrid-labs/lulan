@@ -65,6 +65,7 @@ async fn quotes_price_orders_and_reject_tampering() {
         "DELETE FROM tickets WHERE trip_id = $1",
         "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
         "DELETE FROM passengers WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
+        "DELETE FROM idempotency_keys WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
         "DELETE FROM orders WHERE trip_id = $1",
     ] {
         sqlx::query(sql).bind(trip_id).execute(&pool).await.unwrap();
@@ -116,7 +117,7 @@ async fn quotes_price_orders_and_reject_tampering() {
     let (status, body) = post_json(
         &app,
         "/v1/orders",
-        json!({"trip_id": trip_id, "passengers": [{"full_name": "Eve Test", "type": "adult"}],
+        json!({"trip_id": trip_id, "passengers": [{"full_name": "Eve Test", "type": "adult"}], "guest_contact": "test@example.com",
                "quote_token": tampered, "items": items}),
     )
     .await;
@@ -126,7 +127,7 @@ async fn quotes_price_orders_and_reject_tampering() {
     let (status, _) = post_json(
         &app,
         "/v1/orders",
-        json!({"trip_id": trip_id, "passengers": [{"full_name": "Eve Test", "type": "adult"}], "quote_token": token,
+        json!({"trip_id": trip_id, "passengers": [{"full_name": "Eve Test", "type": "adult"}], "guest_contact": "test@example.com", "quote_token": token,
                "items": [{"unit_code": "11B", "origin": "BTG", "destination": "CEB"}]}),
     )
     .await;
@@ -136,7 +137,7 @@ async fn quotes_price_orders_and_reject_tampering() {
     let (status, order) = post_json(
         &app,
         "/v1/orders",
-        json!({"trip_id": trip_id, "passengers": [{"full_name": "Maria Test", "type": "adult"}],
+        json!({"trip_id": trip_id, "passengers": [{"full_name": "Maria Test", "type": "adult"}], "guest_contact": "test@example.com",
                "quote_token": token, "items": items}),
     )
     .await;

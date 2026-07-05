@@ -16,6 +16,9 @@ chrono = { workspace = true }
 hmac = { workspace = true }
 lulan-engine = { workspace = true }
 lulan-pricing = { path = "../lulan-pricing" }
+jsonwebtoken = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 sha2 = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
@@ -29,4 +32,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 lulan-validate = { workspace = true }
+reqwest = { workspace = true }
 tower = { workspace = true, features = ["util"] }

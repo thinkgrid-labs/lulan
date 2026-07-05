@@ -51,12 +51,21 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Background machinery (needs a database): outbox relay delivering
-    // events to the sink, and the sweeper expiring unpaid orders.
+    // Background machinery (needs a database): outbox relay fanning
+    // events into the webhook delivery queue, the delivery worker POSTing
+    // them, and the sweeper expiring unpaid orders.
     if let Some(pool) = &db {
+        if let Ok(key) = std::env::var("LULAN_BOOTSTRAP_ADMIN_KEY") {
+            lulan_api::auth::bootstrap_admin_key(pool, &key).await?;
+            tracing::info!("bootstrap admin API key active");
+        }
         tokio::spawn(lulan_engine::events::run_relay(
             pool.clone(),
-            lulan_engine::events::TracingSink,
+            lulan_engine::webhooks::WebhookSink::new(pool.clone()),
+            std::time::Duration::from_secs(2),
+        ));
+        tokio::spawn(lulan_engine::webhooks::run_delivery_worker(
+            pool.clone(),
             std::time::Duration::from_secs(2),
         ));
         let sweeper_store = lulan_engine::orders::OrderStore::new(pool.clone());
@@ -103,12 +112,26 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
+    // Customer identity port: HS256 JWT adapter when configured.
+    let identity: Option<std::sync::Arc<dyn lulan_api::identity::IdentityProvider>> =
+        match lulan_api::identity::HsJwtIdentity::from_env() {
+            Some(provider) => {
+                tracing::info!("identity: HS256 JWT provider configured");
+                Some(std::sync::Arc::new(provider))
+            }
+            None => {
+                tracing::info!("identity: no IdP configured — guest checkout only");
+                None
+            }
+        };
+
     let app = router(AppState {
         db,
         redis,
         pricing,
         quote_secret,
         ticket_signer,
+        identity,
     });
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;

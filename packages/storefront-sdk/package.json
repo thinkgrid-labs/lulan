@@ -1,0 +1,42 @@
+{
+  "name": "@lulan/storefront-sdk",
+  "version": "0.6.0",
+  "description": "Typed TypeScript client for the Lulan reservation engine — trip search, quotes, multi-passenger booking, payments, and signed QR tickets.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thinkgrid-labs/lulan.git",
+    "directory": "packages/storefront-sdk"
+  },
+  "keywords": [
+    "lulan",
+    "reservation",
+    "booking",
+    "transit",
+    "ticketing",
+    "sdk"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
