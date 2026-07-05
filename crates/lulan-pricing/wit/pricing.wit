@@ -6,7 +6,10 @@
 // payloads encode. When the host migrates to the component model, modules
 // written against this file are source-compatible.
 
-package lulan:pricing@0.1.0;
+// 0.2.0: added fare-rule-set.passenger-type-discounts and
+//        rule-input.passenger-type (both default-empty; 0.1.0 rule JSON
+//        remains valid).
+package lulan:pricing@0.2.0;
 
 interface types {
     /// Money is integer minor units (e.g. centavos). Never floats.
@@ -38,6 +41,8 @@ interface types {
         advance-purchase-tiers: list<advance-tier>,
         /// promo code -> discount bp
         promos: list<tuple<string, basis-points>>,
+        /// passenger type (child/senior/pwd/...) -> discount bp
+        passenger-type-discounts: list<tuple<string, basis-points>>,
     }
 
     /// Host-derived scalars for one line item. Modules receive NO clock,
@@ -50,6 +55,8 @@ interface types {
         days-before-departure: s32,
         occupancy-bp: basis-points,
         promo-code: option<string>,
+        /// seat items: the passenger's type; pool items: none
+        passenger-type: option<string>,
     }
 
     record adjustment {

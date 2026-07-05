@@ -96,11 +96,19 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let ticket_signer = match &db {
+        Some(pool) => Some(std::sync::Arc::new(
+            lulan_engine::ticket::TicketSigner::load_or_create(pool).await?,
+        )),
+        None => None,
+    };
+
     let app = router(AppState {
         db,
         redis,
         pricing,
         quote_secret,
+        ticket_signer,
     });
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;

@@ -12,7 +12,7 @@ use serde_json::json;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
-use crate::domain::{OrderEventType, OrderStatus, SegmentSpan, apply};
+use crate::domain::{OrderEventType, OrderStatus, PassengerType, SegmentSpan, apply};
 use crate::events;
 use crate::inventory::{
     InventoryStore, StoreError, claim_pool_exec, claim_seat_exec, release_pool_exec,
@@ -24,6 +24,22 @@ pub const CURRENCY: &str = "PHP";
 pub const ORDER_TTL_MINUTES: i64 = 15;
 
 #[derive(Debug, Clone)]
+pub struct NewPassenger {
+    pub full_name: String,
+    pub passenger_type: PassengerType,
+    /// Optional; lets operators verify age-based fares at boarding.
+    pub birthdate: Option<chrono::NaiveDate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PassengerRecord {
+    pub id: Uuid,
+    pub full_name: String,
+    pub passenger_type: PassengerType,
+    pub birthdate: Option<chrono::NaiveDate>,
+}
+
+#[derive(Debug, Clone)]
 pub struct NewOrderItem {
     pub unit_code: String,
     pub origin: String,
@@ -32,6 +48,10 @@ pub struct NewOrderItem {
     /// Priced by the caller (live engine quote or verified quote token) —
     /// the order engine records money, it never computes it.
     pub price_minor: i64,
+    /// Index into the order's passenger list. Required for seat items
+    /// (defaulted to 0 when there is exactly one passenger); must be None
+    /// for pool items, which are order-level.
+    pub passenger_index: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,19 +62,32 @@ pub struct OrderItem {
     pub to_index: u8,
     pub quantity: i32,
     pub price_minor: i64,
+    pub passenger_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct OrderRecord {
     pub order_id: Uuid,
     pub trip_id: Uuid,
+    /// Lead passenger (passengers[0]) — kept for booking lookup.
     pub passenger_name: String,
     pub status: OrderStatus,
     pub total_minor: i64,
     pub currency: String,
     pub payment_intent_id: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
+    pub passengers: Vec<PassengerRecord>,
     pub items: Vec<OrderItem>,
+}
+
+/// Rejections that are the caller's fault, surfaced before anything is
+/// written.
+#[derive(Debug)]
+pub enum ItemValidation {
+    SeatNeedsPassenger { unit_code: String },
+    PassengerIndexOutOfRange { unit_code: String, index: usize },
+    PoolWithPassenger { unit_code: String },
+    NoPassengers,
 }
 
 /// Result of creating an order.
@@ -69,6 +102,8 @@ pub enum CreateOutcome {
     NotFound {
         what: String,
     },
+    /// Malformed passenger/item wiring; nothing was written.
+    Invalid(ItemValidation),
 }
 
 /// Result of a lifecycle transition.
@@ -94,14 +129,18 @@ impl OrderStore {
         Self { pool, inventory }
     }
 
-    /// Create an order: claims + order row + OrderCreated/InventoryLocked
-    /// events, atomically. Any claim conflict rolls back everything.
+    /// Create an order: passengers + claims + order row +
+    /// OrderCreated/InventoryLocked events, atomically. Any claim conflict
+    /// rolls back everything.
     pub async fn create(
         &self,
         trip_id: Uuid,
-        passenger_name: &str,
+        passengers: &[NewPassenger],
         items: &[NewOrderItem],
     ) -> Result<CreateOutcome, StoreError> {
+        if passengers.is_empty() {
+            return Ok(CreateOutcome::Invalid(ItemValidation::NoPassengers));
+        }
         if items.is_empty() {
             return Ok(CreateOutcome::NotFound {
                 what: "items (order must contain at least one)".into(),
@@ -125,6 +164,40 @@ impl OrderStore {
             }
         }
 
+        // Passenger wiring: every seat belongs to exactly one passenger;
+        // pools are order-level.
+        let mut passenger_slots = Vec::with_capacity(items.len());
+        for (item, target) in items.iter().zip(&targets) {
+            let slot = if target.kind == "seat" {
+                let index = match item.passenger_index {
+                    Some(index) => index,
+                    None if passengers.len() == 1 => 0,
+                    None => {
+                        return Ok(CreateOutcome::Invalid(ItemValidation::SeatNeedsPassenger {
+                            unit_code: item.unit_code.clone(),
+                        }));
+                    }
+                };
+                if index >= passengers.len() {
+                    return Ok(CreateOutcome::Invalid(
+                        ItemValidation::PassengerIndexOutOfRange {
+                            unit_code: item.unit_code.clone(),
+                            index,
+                        },
+                    ));
+                }
+                Some(index)
+            } else {
+                if item.passenger_index.is_some() {
+                    return Ok(CreateOutcome::Invalid(ItemValidation::PoolWithPassenger {
+                        unit_code: item.unit_code.clone(),
+                    }));
+                }
+                None
+            };
+            passenger_slots.push(slot);
+        }
+
         let order_id = Uuid::new_v4();
         let expires_at = Utc::now() + chrono::Duration::minutes(ORDER_TTL_MINUTES);
         let total_minor: i64 = items.iter().map(|i| i.price_minor).sum();
@@ -137,7 +210,7 @@ impl OrderStore {
         )
         .bind(order_id)
         .bind(trip_id)
-        .bind(passenger_name)
+        .bind(&passengers[0].full_name)
         .bind(OrderStatus::Locked.as_str())
         .bind(total_minor)
         .bind(CURRENCY)
@@ -145,8 +218,30 @@ impl OrderStore {
         .execute(&mut *tx)
         .await?;
 
+        let mut passenger_records = Vec::with_capacity(passengers.len());
+        for passenger in passengers {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO passengers (id, order_id, full_name, passenger_type, birthdate)
+                 VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(id)
+            .bind(order_id)
+            .bind(&passenger.full_name)
+            .bind(passenger.passenger_type.as_str())
+            .bind(passenger.birthdate)
+            .execute(&mut *tx)
+            .await?;
+            passenger_records.push(PassengerRecord {
+                id,
+                full_name: passenger.full_name.clone(),
+                passenger_type: passenger.passenger_type,
+                birthdate: passenger.birthdate,
+            });
+        }
+
         let mut recorded_items = Vec::with_capacity(items.len());
-        for (item, target) in items.iter().zip(&targets) {
+        for ((item, target), slot) in items.iter().zip(&targets).zip(&passenger_slots) {
             let rows = match target.kind.as_str() {
                 "seat" => claim_seat_exec(&mut *tx, trip_id, target.unit_id, target.span).await?,
                 _ => {
@@ -170,9 +265,10 @@ impl OrderStore {
                     unit_code: item.unit_code.clone(),
                 });
             }
+            let passenger_id = slot.map(|index| passenger_records[index].id);
             sqlx::query(
-                "INSERT INTO order_items (order_id, unit_id, unit_code, kind, from_index, to_index, quantity, price_minor)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                "INSERT INTO order_items (order_id, unit_id, unit_code, kind, from_index, to_index, quantity, price_minor, passenger_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             )
             .bind(order_id)
             .bind(target.unit_id)
@@ -182,6 +278,7 @@ impl OrderStore {
             .bind(i16::from(target.span.to_index()))
             .bind(item.quantity.max(1))
             .bind(item.price_minor)
+            .bind(passenger_id)
             .execute(&mut *tx)
             .await?;
             recorded_items.push(OrderItem {
@@ -191,6 +288,7 @@ impl OrderStore {
                 to_index: target.span.to_index(),
                 quantity: item.quantity.max(1),
                 price_minor: item.price_minor,
+                passenger_id,
             });
         }
 
@@ -204,13 +302,24 @@ impl OrderStore {
                 })
             })
             .collect();
+        let passengers_json: Vec<_> = passenger_records
+            .iter()
+            .map(|p| {
+                json!({
+                    "id": p.id,
+                    "full_name": p.full_name,
+                    "passenger_type": p.passenger_type.as_str(),
+                    "birthdate": p.birthdate,
+                })
+            })
+            .collect();
         events::append(
             &mut tx,
             order_id,
             OrderEventType::OrderCreated.as_str(),
             json!({
                 "trip_id": trip_id,
-                "passenger_name": passenger_name,
+                "passengers": passengers_json,
                 "total_minor": total_minor,
                 "currency": CURRENCY,
                 "items": items_json,
@@ -230,12 +339,13 @@ impl OrderStore {
         Ok(CreateOutcome::Created(OrderRecord {
             order_id,
             trip_id,
-            passenger_name: passenger_name.to_string(),
+            passenger_name: passenger_records[0].full_name.clone(),
             status: OrderStatus::Locked,
             total_minor,
             currency: CURRENCY.to_string(),
             payment_intent_id: None,
             expires_at: Some(expires_at),
+            passengers: passenger_records,
             items: recorded_items,
         }))
     }
@@ -266,6 +376,19 @@ impl OrderStore {
         }
         tx.commit().await?;
         Ok(outcome)
+    }
+
+    /// Locate an order by its payment intent (webhook post-processing).
+    pub async fn find_by_intent(
+        &self,
+        payment_intent_id: &str,
+    ) -> Result<Option<Uuid>, StoreError> {
+        Ok(
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM orders WHERE payment_intent_id = $1")
+                .bind(payment_intent_id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
     }
 
     /// Reconcile a provider webhook by intent id. Idempotent: duplicates and
@@ -395,8 +518,30 @@ impl OrderStore {
             return Ok(None);
         };
 
+        let passenger_rows = sqlx::query(
+            "SELECT id, full_name, passenger_type, birthdate
+             FROM passengers WHERE order_id = $1 ORDER BY created_at, id",
+        )
+        .bind(order_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let passengers = passenger_rows
+            .into_iter()
+            .map(|r| {
+                Ok(PassengerRecord {
+                    id: r.try_get("id")?,
+                    full_name: r.try_get("full_name")?,
+                    passenger_type: PassengerType::parse(
+                        r.get::<String, _>("passenger_type").as_str(),
+                    )
+                    .expect("passengers.passenger_type CHECK guarantees a known value"),
+                    birthdate: r.try_get("birthdate")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
         let item_rows = sqlx::query(
-            "SELECT unit_code, kind, from_index, to_index, quantity, price_minor
+            "SELECT unit_code, kind, from_index, to_index, quantity, price_minor, passenger_id
              FROM order_items WHERE order_id = $1 ORDER BY unit_code",
         )
         .bind(order_id)
@@ -413,6 +558,7 @@ impl OrderStore {
             currency: row.try_get("currency")?,
             payment_intent_id: row.try_get("payment_intent_id")?,
             expires_at: row.try_get("expires_at")?,
+            passengers,
             items: item_rows
                 .into_iter()
                 .map(|r| {
@@ -423,6 +569,7 @@ impl OrderStore {
                         to_index: r.try_get::<i16, _>("to_index")? as u8,
                         quantity: r.try_get("quantity")?,
                         price_minor: r.try_get("price_minor")?,
+                        passenger_id: r.try_get("passenger_id")?,
                     })
                 })
                 .collect::<Result<Vec<_>, sqlx::Error>>()?,

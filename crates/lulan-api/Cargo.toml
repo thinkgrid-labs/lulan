@@ -28,4 +28,5 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+lulan-validate = { workspace = true }
 tower = { workspace = true, features = ["util"] }

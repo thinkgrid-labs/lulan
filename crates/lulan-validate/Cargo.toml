@@ -1,9 +1,29 @@
 [package]
 name = "lulan-validate"
-description = "Lulan offline ticket verification core; compiles to WASM for @lulan/validate"
+description = "Offline Lulan ticket verification: pure, no server dependency, compiles to WASM"
 license = "MIT"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+base64 = { workspace = true }
+ciborium = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+thiserror = { workspace = true }
+# Not the workspace dep: the validator only parses/prints UUIDs, and the
+# workspace's `v4` feature drags in randomness that wasm32-unknown-unknown
+# doesn't have.
+uuid = { version = "1", default-features = false, features = ["serde", "std"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# Tests generate random ids; native-only, so v4 is fine here.
+uuid = { version = "1", features = ["v4"] }

@@ -10,6 +10,7 @@ pub mod quotes;
 pub mod reservations;
 pub mod seed;
 pub mod state;
+pub mod tickets;
 pub mod trips;
 
 use axum::{
@@ -43,6 +44,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/orders/{order_id}/cancel", post(orders::cancel))
         .route("/v1/payments/fake/webhook", post(orders::fake_webhook))
+        .route(
+            "/v1/orders/{order_id}/tickets",
+            post(tickets::issue).get(tickets::list),
+        )
+        .route("/v1/ticket-keys", get(tickets::keys))
+        .route("/v1/scans", post(tickets::sync))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -56,7 +63,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoints_respond_without_a_database() {
-        let app = router(AppState::new(None, None));
+        let app = router(AppState::new(None, None).await);
 
         for path in ["/health/live", "/health/ready"] {
             let response = app
@@ -70,7 +77,7 @@ mod tests {
 
     #[tokio::test]
     async fn trip_endpoints_report_unavailable_without_a_database() {
-        let app = router(AppState::new(None, None));
+        let app = router(AppState::new(None, None).await);
         let response = app
             .oneshot(
                 Request::builder()

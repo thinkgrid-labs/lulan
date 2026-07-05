@@ -9,9 +9,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+base64 = { workspace = true }
 chrono = { workspace = true }
+ciborium = { workspace = true }
+ed25519-dalek = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
+serde_bytes = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
@@ -20,4 +24,5 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+lulan-validate = { workspace = true }
 proptest = { workspace = true }

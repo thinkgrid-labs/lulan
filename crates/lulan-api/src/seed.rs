@@ -20,14 +20,10 @@ const STOPS: [(&str, &str); 4] = [
 const SEGMENTS: i16 = 3;
 const DAYS: i64 = 7;
 
-/// Default fare policy for the demo network. Idempotent.
+/// Default fare policy for the demo network. Idempotent, and upgrades in
+/// place: if the active ruleset differs from the current default (e.g. a
+/// newer engine added fields), it is deactivated and replaced.
 async fn seed_fare_rules(pool: &PgPool) -> anyhow::Result<()> {
-    let existing = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fare_rules WHERE active")
-        .fetch_one(pool)
-        .await?;
-    if existing > 0 {
-        return Ok(());
-    }
     let rules = serde_json::json!({
         "currency": "PHP",
         "base_fare_per_segment": {
@@ -47,9 +43,28 @@ async fn seed_fare_rules(pool: &PgPool) -> anyhow::Result<()> {
             {"min_days": 14, "discount_bp": 2_000},
         ],
         "promos": {"BAGONGBYAHE": 500},
+        "passenger_type_discounts": {
+            "senior": 2_000,
+            "pwd": 2_000,
+            "child": 5_000,
+            "infant": 10_000,
+        },
     });
     // Fail fast if the JSON ever drifts from the engine's schema.
     let _: lulan_pricing::rules::FareRuleSet = serde_json::from_value(rules.clone())?;
+
+    let current: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT rules FROM fare_rules WHERE active ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    if current.as_ref() == Some(&rules) {
+        return Ok(());
+    }
+
+    sqlx::query("UPDATE fare_rules SET active = false WHERE active")
+        .execute(pool)
+        .await?;
     sqlx::query("INSERT INTO fare_rules (id, active, rules) VALUES ($1, true, $2)")
         .bind(Uuid::new_v4())
         .bind(rules)

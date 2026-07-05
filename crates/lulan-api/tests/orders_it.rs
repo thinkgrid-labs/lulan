@@ -35,19 +35,17 @@ async fn setup(offset: i64) -> Option<(PgPool, Uuid, axum::Router)> {
             .await
             .unwrap()
             .get(0);
-    // Idempotent fixture: clear occupancy and any orders from prior runs.
-    sqlx::query(
+    // Idempotent fixture: clear this trip's orders and everything hanging
+    // off them (scan events → tickets → items → passengers → orders).
+    for sql in [
+        "DELETE FROM scan_events WHERE ticket_id IN (SELECT id FROM tickets WHERE trip_id = $1)",
+        "DELETE FROM tickets WHERE trip_id = $1",
         "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
-    )
-    .bind(trip_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query("DELETE FROM orders WHERE trip_id = $1")
-        .bind(trip_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        "DELETE FROM passengers WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
+        "DELETE FROM orders WHERE trip_id = $1",
+    ] {
+        sqlx::query(sql).bind(trip_id).execute(&pool).await.unwrap();
+    }
     sqlx::query("UPDATE seat_occupancy SET occupied_mask = 0 WHERE trip_id = $1")
         .bind(trip_id)
         .execute(&pool)
@@ -62,7 +60,7 @@ async fn setup(offset: i64) -> Option<(PgPool, Uuid, axum::Router)> {
     .await
     .unwrap();
 
-    let app = lulan_api::router(AppState::new(Some(pool.clone()), None));
+    let app = lulan_api::router(AppState::new(Some(pool.clone()), None).await);
     Some((pool, trip_id, app))
 }
 
@@ -121,10 +119,13 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
         "/v1/orders",
         Some(json!({
             "trip_id": trip_id,
-            "passenger_name": "Maria Santos",
+            "passengers": [
+                {"full_name": "Maria Santos", "type": "adult"},
+                {"full_name": "Jose Santos", "type": "senior", "birthdate": "1958-03-14"},
+            ],
             "items": [
-                {"unit_code": "5A", "origin": "BTG", "destination": "CEB"},
-                {"unit_code": "5B", "origin": "BTG", "destination": "CEB"},
+                {"unit_code": "5A", "origin": "BTG", "destination": "CEB", "passenger": 0},
+                {"unit_code": "5B", "origin": "BTG", "destination": "CEB", "passenger": 1},
                 {"unit_code": "VEHICLE_DECK", "origin": "BTG", "destination": "CEB", "quantity": 1},
             ],
         })),
@@ -141,6 +142,23 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
         .sum();
     assert!(item_sum > 0, "items must carry real prices");
     assert_eq!(order["total_minor"].as_i64().unwrap(), item_sum);
+    // The senior's seat (same class, same span) must be cheaper than the
+    // adult's — mandated discount flowing through live pricing.
+    let price_of = |code: &str| -> i64 {
+        order["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["unit_code"] == code)
+            .unwrap()["price_minor"]
+            .as_i64()
+            .unwrap()
+    };
+    assert!(
+        price_of("5B") < price_of("5A"),
+        "senior discount must apply"
+    );
+    assert_eq!(order["passengers"].as_array().unwrap().len(), 2);
     let order_id = order["order_id"].as_str().unwrap().to_string();
 
     // The claims are visible in availability immediately.
@@ -175,7 +193,8 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(hook["order_status"], "paid");
+    // Capture auto-issues tickets (Phase 5): the order lands on Ticketed.
+    assert_eq!(hook["order_status"], "ticketed");
     assert_eq!(hook["applied"], true);
 
     // Duplicate delivery: acknowledged, not applied, state unchanged.
@@ -188,7 +207,7 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(dup["applied"], false);
-    assert_eq!(dup["order_status"], "paid");
+    assert_eq!(dup["order_status"], "ticketed");
 
     // Out-of-order failure after capture: same idempotent no-op.
     let (status, late_fail) = request(
@@ -200,7 +219,7 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(late_fail["applied"], false);
-    assert_eq!(late_fail["order_status"], "paid");
+    assert_eq!(late_fail["order_status"], "ticketed");
 
     // Paid orders cannot be cancelled.
     let (status, _) = request(
@@ -226,10 +245,11 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
             "order_created",
             "inventory_locked",
             "payment_requested",
-            "payment_captured"
+            "payment_captured",
+            "ticket_issued"
         ]
     );
-    assert_eq!(details["status"], "paid");
+    assert_eq!(details["status"], "ticketed");
     assert!(details["expires_at"].is_null(), "paid orders don't expire");
 
     // Exit criterion: replaying the event stream reproduces the read model.
@@ -239,7 +259,7 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(replayed, lulan_engine::domain::OrderStatus::Paid);
+    assert_eq!(replayed, lulan_engine::domain::OrderStatus::Ticketed);
 }
 
 #[tokio::test]
@@ -254,7 +274,7 @@ async fn conflicting_order_rolls_back_completely() {
         "POST",
         "/v1/orders",
         Some(json!({
-            "trip_id": trip_id, "passenger_name": "A",
+            "trip_id": trip_id, "passengers": [{"full_name": "A Test", "type": "adult"}],
             "items": [{"unit_code": "6A", "origin": "BTG", "destination": "CEB"}],
         })),
     )
@@ -272,7 +292,7 @@ async fn conflicting_order_rolls_back_completely() {
         "POST",
         "/v1/orders",
         Some(json!({
-            "trip_id": trip_id, "passenger_name": "B",
+            "trip_id": trip_id, "passengers": [{"full_name": "B Test", "type": "adult"}],
             "items": [
                 {"unit_code": "6B", "origin": "BTG", "destination": "CEB"},
                 {"unit_code": "6A", "origin": "CTC", "destination": "CEB"},
@@ -314,7 +334,7 @@ async fn cancel_and_expiry_release_inventory() {
         "POST",
         "/v1/orders",
         Some(json!({
-            "trip_id": trip_id, "passenger_name": "C",
+            "trip_id": trip_id, "passengers": [{"full_name": "C Test", "type": "adult"}],
             "items": [
                 {"unit_code": "7A", "origin": "BTG", "destination": "ILO"},
                 {"unit_code": "VEHICLE_DECK", "origin": "BTG", "destination": "ILO", "quantity": 2},
@@ -354,7 +374,7 @@ async fn cancel_and_expiry_release_inventory() {
         "POST",
         "/v1/orders",
         Some(json!({
-            "trip_id": trip_id, "passenger_name": "D",
+            "trip_id": trip_id, "passengers": [{"full_name": "D Test", "type": "adult"}],
             "items": [{"unit_code": "8A", "origin": "BTG", "destination": "CEB"}],
         })),
     )

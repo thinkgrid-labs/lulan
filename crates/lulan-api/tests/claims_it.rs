@@ -88,7 +88,7 @@ async fn concurrent_claims_never_double_sell() {
     let Some((pool, trip_id)) = setup(0).await else {
         return;
     };
-    let app = lulan_api::router(AppState::new(Some(pool.clone()), None));
+    let app = lulan_api::router(AppState::new(Some(pool.clone()), None).await);
 
     // Race 1: 500 contenders, same seat, same full-journey span.
     let mut tasks = tokio::task::JoinSet::new();
@@ -210,7 +210,7 @@ async fn hold_flow_protects_spans_and_feeds_claims() {
     // slate so holds from previous runs (10-minute TTL) can't collide.
     let _: () = redis::cmd("FLUSHDB").query_async(&mut redis).await.unwrap();
 
-    let app = lulan_api::router(AppState::new(Some(pool.clone()), Some(redis)));
+    let app = lulan_api::router(AppState::new(Some(pool.clone()), Some(redis)).await);
     let holds_uri = format!("/v1/trips/{trip_id}/holds");
 
     // Hold BTG→ILO on 3C.

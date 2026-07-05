@@ -20,6 +20,10 @@ pub struct PriceableItem {
     pub destination: String,
     #[serde(default)]
     pub quantity: Option<i32>,
+    /// Travelling passenger's type for seat items (drives mandated
+    /// discounts); ignored for pools.
+    #[serde(default)]
+    pub passenger_type: Option<String>,
 }
 
 /// A priced line item, span-resolved.
@@ -30,6 +34,7 @@ pub struct PricedItem {
     pub from_index: u8,
     pub to_index: u8,
     pub quantity: i32,
+    pub passenger_type: Option<String>,
     pub quote: Quote,
 }
 
@@ -94,6 +99,13 @@ pub async fn price_items(
             .span_occupancy_bp(trip_id, target.unit_id, &target.kind, target.span)
             .await?;
 
+        // Passenger-type discounts apply to seats only; pools are
+        // order-level goods.
+        let passenger_type = if target.kind == "seat" {
+            item.passenger_type.clone()
+        } else {
+            None
+        };
         let input = RuleInput {
             fare_key: target.fare_key(&item.unit_code).to_string(),
             segments: target.span.segment_count(),
@@ -102,6 +114,7 @@ pub async fn price_items(
             days_before_departure,
             occupancy_bp,
             promo_code: promo_code.map(String::from),
+            passenger_type: passenger_type.clone(),
         };
         let quote = state
             .pricing
@@ -115,6 +128,7 @@ pub async fn price_items(
             from_index: target.span.from_index(),
             to_index: target.span.to_index(),
             quantity,
+            passenger_type,
             quote,
         });
     }

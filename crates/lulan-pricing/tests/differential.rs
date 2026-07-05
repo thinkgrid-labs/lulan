@@ -98,6 +98,15 @@ fn rules_strategy() -> impl Strategy<Value = FareRuleSet> {
         0i64..10_000,
         0..2,
     );
+    let passenger_discounts = proptest::collection::btree_map(
+        prop_oneof![
+            Just("child".to_string()),
+            Just("senior".to_string()),
+            Just("pwd".to_string()),
+        ],
+        0i64..10_000,
+        0..3,
+    );
     (
         fares,
         proptest::collection::vec(0u8..7, 0..4),
@@ -105,6 +114,7 @@ fn rules_strategy() -> impl Strategy<Value = FareRuleSet> {
         occupancy,
         advance,
         promos,
+        passenger_discounts,
     )
         .prop_map(
             |(
@@ -114,6 +124,7 @@ fn rules_strategy() -> impl Strategy<Value = FareRuleSet> {
                 occupancy_tiers,
                 advance_purchase_tiers,
                 promos,
+                passenger_type_discounts,
             )| FareRuleSet {
                 currency: "PHP".into(),
                 base_fare_per_segment,
@@ -122,6 +133,7 @@ fn rules_strategy() -> impl Strategy<Value = FareRuleSet> {
                 occupancy_tiers,
                 advance_purchase_tiers,
                 promos,
+                passenger_type_discounts,
             },
         )
 }
@@ -144,6 +156,12 @@ fn input_strategy() -> impl Strategy<Value = RuleInput> {
             Just(Some("PROMO1".to_string())),
             Just(Some("NOPE".to_string())),
         ],
+        prop_oneof![
+            Just(None),
+            Just(Some("child".to_string())),
+            Just(Some("senior".to_string())),
+            Just(Some("alien".to_string())),
+        ],
     )
         .prop_map(
             |(
@@ -154,6 +172,7 @@ fn input_strategy() -> impl Strategy<Value = RuleInput> {
                 days_before_departure,
                 occupancy_bp,
                 promo_code,
+                passenger_type,
             )| RuleInput {
                 fare_key,
                 segments,
@@ -162,6 +181,7 @@ fn input_strategy() -> impl Strategy<Value = RuleInput> {
                 days_before_departure,
                 occupancy_bp,
                 promo_code,
+                passenger_type,
             },
         )
 }
@@ -210,6 +230,7 @@ fn wasm_call_latency_within_prd_target() {
         days_before_departure: 10,
         occupancy_bp: 6_000,
         promo_code: Some("PROMO1".into()),
+        passenger_type: Some("senior".into()),
     };
 
     // Warm-up, then measure (instantiate-per-call included).

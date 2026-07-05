@@ -33,6 +33,11 @@ pub struct FareRuleSet {
     /// Promo code → discount basis points (applied to base).
     #[serde(default)]
     pub promos: BTreeMap<String, i64>,
+    /// Passenger type (`child`, `senior`, `pwd`, …) → discount basis
+    /// points. Senior/PWD discounts are legally mandated in some markets
+    /// (e.g. PH), so this is a first-class fare input.
+    #[serde(default)]
+    pub passenger_type_discounts: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +71,10 @@ pub struct RuleInput {
     pub occupancy_bp: i64,
     #[serde(default)]
     pub promo_code: Option<String>,
+    /// The travelling passenger's type for seat items (`adult`, `child`,
+    /// `senior`, `pwd`, `infant`); None for order-level pool items.
+    #[serde(default)]
+    pub passenger_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -166,6 +175,16 @@ pub fn evaluate(rules: &FareRuleSet, input: &RuleInput) -> Result<Quote, EvalErr
         });
     }
 
+    if let Some(passenger_type) = &input.passenger_type
+        && let Some(discount_bp) = rules.passenger_type_discounts.get(passenger_type)
+        && *discount_bp != 0
+    {
+        adjustments.push(Adjustment {
+            label: format!("passenger:{passenger_type}"),
+            amount_minor: -bp(base, *discount_bp),
+        });
+    }
+
     if let Some(code) = &input.promo_code
         && let Some(discount_bp) = rules.promos.get(code)
     {
@@ -221,6 +240,11 @@ mod tests {
                 },
             ],
             promos: BTreeMap::from([("BAGONGBYAHE".into(), 500)]),
+            passenger_type_discounts: BTreeMap::from([
+                ("senior".into(), 2_000),
+                ("pwd".into(), 2_000),
+                ("child".into(), 5_000),
+            ]),
         }
     }
 
@@ -233,6 +257,7 @@ mod tests {
             days_before_departure: 0,
             occupancy_bp: 0,
             promo_code: None,
+            passenger_type: None,
         }
     }
 
@@ -285,6 +310,21 @@ mod tests {
         let q = evaluate(&rules, &i).unwrap();
         assert_eq!(q.total_minor, 0);
         assert_eq!(q.adjustments.len(), 1, "unknown promo adds nothing");
+    }
+
+    #[test]
+    fn passenger_type_discounts_apply_and_unknown_types_do_not() {
+        let mut i = input("economy");
+        i.passenger_type = Some("senior".into());
+        let q = evaluate(&demo_rules(), &i).unwrap();
+        // 45000 - 20% = 36000
+        assert_eq!(q.total_minor, 36_000);
+        assert_eq!(q.adjustments[0].label, "passenger:senior");
+
+        i.passenger_type = Some("astronaut".into());
+        let q = evaluate(&demo_rules(), &i).unwrap();
+        assert_eq!(q.total_minor, 45_000);
+        assert!(q.adjustments.is_empty());
     }
 
     #[test]

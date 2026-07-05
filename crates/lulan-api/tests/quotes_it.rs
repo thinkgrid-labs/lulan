@@ -58,27 +58,26 @@ async fn quotes_price_orders_and_reject_tampering() {
             .await
             .unwrap()
             .get(0);
-    sqlx::query(
+    // Idempotent fixture: clear this trip's orders and everything hanging
+    // off them (scan events → tickets → items → passengers → orders).
+    for sql in [
+        "DELETE FROM scan_events WHERE ticket_id IN (SELECT id FROM tickets WHERE trip_id = $1)",
+        "DELETE FROM tickets WHERE trip_id = $1",
         "DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
-    )
-    .bind(trip_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query("DELETE FROM orders WHERE trip_id = $1")
-        .bind(trip_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+        "DELETE FROM passengers WHERE order_id IN (SELECT id FROM orders WHERE trip_id = $1)",
+        "DELETE FROM orders WHERE trip_id = $1",
+    ] {
+        sqlx::query(sql).bind(trip_id).execute(&pool).await.unwrap();
+    }
     sqlx::query("UPDATE seat_occupancy SET occupied_mask = 0 WHERE trip_id = $1")
         .bind(trip_id)
         .execute(&pool)
         .await
         .unwrap();
 
-    let app = lulan_api::router(AppState::new(Some(pool.clone()), None));
+    let app = lulan_api::router(AppState::new(Some(pool.clone()), None).await);
     let items = json!([
-        {"unit_code": "11A", "origin": "BTG", "destination": "CEB"},
+        {"unit_code": "11A", "origin": "BTG", "destination": "CEB", "passenger_type": "adult"},
         {"unit_code": "CARGO_KG", "origin": "BTG", "destination": "ILO", "quantity": 100},
     ]);
 
@@ -117,7 +116,7 @@ async fn quotes_price_orders_and_reject_tampering() {
     let (status, body) = post_json(
         &app,
         "/v1/orders",
-        json!({"trip_id": trip_id, "passenger_name": "Eve",
+        json!({"trip_id": trip_id, "passengers": [{"full_name": "Eve Test", "type": "adult"}],
                "quote_token": tampered, "items": items}),
     )
     .await;
@@ -127,7 +126,7 @@ async fn quotes_price_orders_and_reject_tampering() {
     let (status, _) = post_json(
         &app,
         "/v1/orders",
-        json!({"trip_id": trip_id, "passenger_name": "Eve", "quote_token": token,
+        json!({"trip_id": trip_id, "passengers": [{"full_name": "Eve Test", "type": "adult"}], "quote_token": token,
                "items": [{"unit_code": "11B", "origin": "BTG", "destination": "CEB"}]}),
     )
     .await;
@@ -137,7 +136,7 @@ async fn quotes_price_orders_and_reject_tampering() {
     let (status, order) = post_json(
         &app,
         "/v1/orders",
-        json!({"trip_id": trip_id, "passenger_name": "Maria",
+        json!({"trip_id": trip_id, "passengers": [{"full_name": "Maria Test", "type": "adult"}],
                "quote_token": token, "items": items}),
     )
     .await;

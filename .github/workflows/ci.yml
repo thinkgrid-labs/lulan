@@ -49,6 +49,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Validate compiles for wasm32 (offline validator)
+        run: cargo build -p lulan-validate --target wasm32-unknown-unknown --release
       - name: Test
         run: cargo test --workspace
 

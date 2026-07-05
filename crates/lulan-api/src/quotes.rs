@@ -40,6 +40,10 @@ pub struct QuoteTokenItem {
     pub origin: String,
     pub destination: String,
     pub quantity: i32,
+    /// Part of the match key: a senior-priced quote can't buy an adult
+    /// seat.
+    #[serde(default)]
+    pub passenger_type: Option<String>,
     pub price_minor: i64,
 }
 
@@ -89,6 +93,7 @@ pub struct QuotedItem {
     origin: String,
     destination: String,
     quantity: i32,
+    passenger_type: Option<String>,
     #[serde(flatten)]
     quote: Quote,
 }
@@ -119,6 +124,7 @@ pub async fn create(
                 origin: p.origin.clone(),
                 destination: p.destination.clone(),
                 quantity: p.quantity,
+                passenger_type: p.passenger_type.clone(),
                 price_minor: p.quote.total_minor,
             })
             .collect(),
@@ -135,6 +141,7 @@ pub async fn create(
                 origin: p.origin,
                 destination: p.destination,
                 quantity: p.quantity,
+                passenger_type: p.passenger_type,
                 quote: p.quote,
             })
             .collect(),

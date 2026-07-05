@@ -22,17 +22,32 @@ pub struct AppState {
     pub pricing: Arc<dyn PricingEngine>,
     /// HMAC key for quote tokens.
     pub quote_secret: Arc<Vec<u8>>,
+    /// Ed25519 ticket signer, loaded/created at boot when a database is
+    /// configured. None = ticket issuance returns 503.
+    pub ticket_signer: Option<Arc<lulan_engine::ticket::TicketSigner>>,
 }
 
 impl AppState {
     /// Native pricing engine and an ephemeral quote secret — what tests
-    /// and infra-less boots want.
-    pub fn new(db: Option<PgPool>, redis: Option<ConnectionManager>) -> Self {
+    /// and infra-less boots want. Loads/creates the ticket signing key
+    /// when a database is present.
+    pub async fn new(db: Option<PgPool>, redis: Option<ConnectionManager>) -> Self {
+        let ticket_signer = match &db {
+            Some(pool) => match lulan_engine::ticket::TicketSigner::load_or_create(pool).await {
+                Ok(signer) => Some(Arc::new(signer)),
+                Err(err) => {
+                    tracing::error!(error = %err, "ticket signer unavailable");
+                    None
+                }
+            },
+            None => None,
+        };
         Self {
             db,
             redis,
             pricing: Arc::new(NativeEngine),
             quote_secret: Arc::new(ephemeral_secret()),
+            ticket_signer,
         }
     }
 
