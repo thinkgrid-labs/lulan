@@ -43,14 +43,45 @@ pub struct SeatAvailability {
     pub available: bool,
 }
 
-/// A search hit: one trip serving the requested origin → destination.
+/// The carrier/agency operating a trip (airline, ferry line, bus company).
+#[derive(Debug, Serialize)]
+pub struct Operator {
+    pub code: String,
+    pub name: String,
+}
+
+/// The physical vehicle serving a trip (aircraft, vessel, coach).
+#[derive(Debug, Serialize)]
+pub struct Vehicle {
+    pub code: String,
+    pub name: String,
+    pub kind: String,
+}
+
+/// A search hit: one trip serving the requested origin → destination, with
+/// schedule (departure + arrival for the requested span) and identity.
 #[derive(Debug, Serialize)]
 pub struct TripSummary {
     pub trip_id: Uuid,
     pub route_code: String,
-    pub departs_at: DateTime<Utc>,
+    /// Carrier; None until an operator is assigned to the trip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operator: Option<Operator>,
+    /// Passenger-facing service designator (flight/service number).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_number: Option<String>,
+    pub vehicle: Vehicle,
     pub origin: String,
     pub destination: String,
+    /// Departure from the requested origin (not necessarily the route's
+    /// first stop).
+    pub departs_at: DateTime<Utc>,
+    /// Arrival at the requested destination, when the schedule is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arrives_at: Option<DateTime<Utc>>,
+    /// Journey time for the requested span, when the schedule is known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_minutes: Option<i64>,
     pub from_index: u8,
     pub to_index: u8,
     pub seats: Vec<FareAvailability>,
@@ -303,14 +334,19 @@ impl InventoryStore {
     ) -> Result<Vec<TripSummary>, StoreError> {
         let rows = sqlx::query(
             r#"
-            SELECT t.id, r.code AS route_code, t.departs_at,
-                   o.stop_index AS from_index, d.stop_index AS to_index
+            SELECT t.id, r.code AS route_code, t.departs_at, t.service_number,
+                   o.stop_index AS from_index, d.stop_index AS to_index,
+                   o.depart_offset_min AS depart_offset, d.arrive_offset_min AS arrive_offset,
+                   res.code AS vehicle_code, res.name AS vehicle_name, res.kind AS vehicle_kind,
+                   op.code AS operator_code, op.name AS operator_name
             FROM trips t
-            JOIN routes r       ON r.id = t.route_id
-            JOIN route_stops o  ON o.route_id = r.id
-            JOIN locations lo   ON lo.id = o.location_id AND lo.code = $1
-            JOIN route_stops d  ON d.route_id = r.id
-            JOIN locations ld   ON ld.id = d.location_id AND ld.code = $2
+            JOIN routes r        ON r.id = t.route_id
+            JOIN resources res   ON res.id = t.resource_id
+            LEFT JOIN operators op ON op.id = t.operator_id
+            JOIN route_stops o   ON o.route_id = r.id
+            JOIN locations lo    ON lo.id = o.location_id AND lo.code = $1
+            JOIN route_stops d   ON d.route_id = r.id
+            JOIN locations ld    ON ld.id = d.location_id AND ld.code = $2
             WHERE o.stop_index < d.stop_index
               AND t.service_date = $3
             ORDER BY t.departs_at
@@ -328,13 +364,47 @@ impl InventoryStore {
             let from_index: i16 = row.try_get("from_index")?;
             let to_index: i16 = row.try_get("to_index")?;
             let span = SegmentSpan::new(from_index as u8, to_index as u8)?;
+            let departs_at: DateTime<Utc> = row.try_get("departs_at")?;
+
+            // Absolute schedule for the requested span from route-pattern
+            // offsets. A route with no schedule has all-zero offsets, which
+            // we surface as "unknown" (None) rather than a bogus 0-minute
+            // trip.
+            let depart_offset: i32 = row.try_get("depart_offset")?;
+            let arrive_offset: i32 = row.try_get("arrive_offset")?;
+            let (arrives_at, duration_minutes) = if arrive_offset > depart_offset {
+                let arrives = departs_at + chrono::Duration::minutes(arrive_offset as i64);
+                let departs = departs_at + chrono::Duration::minutes(depart_offset as i64);
+                (Some(arrives), Some((arrives - departs).num_minutes()))
+            } else {
+                (None, None)
+            };
+            // Origin departure = trip departure + this stop's depart offset.
+            let leg_departs_at = departs_at + chrono::Duration::minutes(depart_offset as i64);
+
+            let operator = match (
+                row.try_get::<Option<String>, _>("operator_code")?,
+                row.try_get::<Option<String>, _>("operator_name")?,
+            ) {
+                (Some(code), Some(name)) => Some(Operator { code, name }),
+                _ => None,
+            };
 
             trips.push(TripSummary {
                 trip_id,
                 route_code: row.try_get("route_code")?,
-                departs_at: row.try_get("departs_at")?,
+                operator,
+                service_number: row.try_get("service_number")?,
+                vehicle: Vehicle {
+                    code: row.try_get("vehicle_code")?,
+                    name: row.try_get("vehicle_name")?,
+                    kind: row.try_get("vehicle_kind")?,
+                },
                 origin: origin.to_string(),
                 destination: destination.to_string(),
+                departs_at: leg_departs_at,
+                arrives_at,
+                duration_minutes,
                 from_index: span.from_index(),
                 to_index: span.to_index(),
                 seats: self.fare_availability(trip_id, span).await?,

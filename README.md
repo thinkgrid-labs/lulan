@@ -58,7 +58,7 @@ Selling a seat means atomically claiming a **span of segments** on a **specific 
 
 A booking flows through five stages, each independently verifiable:
 
-1. **Search & availability** — `GET /v1/trips/search` answers span-aware availability (per-segment seat and pool occupancy).
+1. **Search & availability** — `GET /v1/trips/search` returns candidate trips per leg (one-way or round-trip), each with operator, service number, vehicle, schedule, and span-aware seat/pool availability.
 2. **Quote** — `POST /v1/quotes` prices the itinerary (per passenger type, occupancy, peak day, promos) and returns a signed, short-lived quote token.
 3. **Order** — `POST /v1/orders` atomically claims every item for N passengers; any conflict rolls back everything.
 4. **Pay & ticket** — a payment-provider webhook captures payment and auto-issues one Ed25519-signed QR ticket per passenger.
@@ -79,7 +79,7 @@ Book a ticket end to end:
 
 ```bash
 # 1. Find a departure (sample dataset: a 4-stop ferry line, BTG → … → CEB)
-curl "localhost:8080/v1/trips/search?origin=BTG&destination=CEB&date=$(date +%F)"
+curl "localhost:8080/v1/trips/search?origin=BTG&destination=CEB&departure_date=$(date +%F)"
 
 # 2. Quote a senior + child itinerary (concession fares applied automatically)
 curl -X POST localhost:8080/v1/quotes -H 'content-type: application/json' -d '{
@@ -106,7 +106,7 @@ just loadgen 10000 0.5     # 10k contenders, 50% via holds — expect 0 double-s
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/trips/search` | Trip search with span-aware availability |
+| `GET /v1/trips/search` | One-way / round-trip search: candidate trips per leg with schedule + availability |
 | `GET /v1/trips/{id}/availability` | Per-seat / per-pool availability for a journey span |
 | `POST /v1/trips/{id}/holds` | Soft-hold a seat span (TTL, Redis) |
 | `POST /v1/quotes` | Itemised fare quote + signed quote token |

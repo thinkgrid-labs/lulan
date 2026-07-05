@@ -168,7 +168,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/v1/trips/search?origin=BTG&destination=CEB&date=2026-07-06")
+                    .uri("/v1/trips/search?origin=BTG&destination=CEB&departure_date=2026-07-06")
                     .body(Body::empty())
                     .unwrap(),
             )

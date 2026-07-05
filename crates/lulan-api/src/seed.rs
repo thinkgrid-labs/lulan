@@ -20,6 +20,11 @@ const STOPS: [(&str, &str); 4] = [
 const SEGMENTS: i16 = 3;
 const DAYS: i64 = 7;
 
+/// Per-stop schedule offsets (arrive, depart) in minutes from the trip's
+/// origin departure — a long inter-island run with ~30-min dwells. Same
+/// pattern serves both directions.
+const STOP_SCHEDULE: [(i32, i32); 4] = [(0, 0), (240, 270), (510, 540), (780, 780)];
+
 /// Default fare policy for the demo network. Idempotent, and upgrades in
 /// place: if the active ruleset differs from the current default (e.g. a
 /// newer engine added fields), it is deactivated and replaced.
@@ -104,18 +109,29 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<()> {
         location_ids.push(id);
     }
 
+    // The operator (carrier) running the service.
+    let operator_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO operators (id, code, name) VALUES ($1, 'LUL', 'Lulan Ferries')")
+        .bind(operator_id)
+        .execute(&mut *tx)
+        .await?;
+
     let route_id = Uuid::new_v4();
     sqlx::query("INSERT INTO routes (id, code, name) VALUES ($1, 'BTG-CEB', 'Batangas – Cebu')")
         .bind(route_id)
         .execute(&mut *tx)
         .await?;
     for (index, location_id) in location_ids.iter().enumerate() {
+        let (arrive, depart) = STOP_SCHEDULE[index];
         sqlx::query(
-            "INSERT INTO route_stops (route_id, stop_index, location_id) VALUES ($1, $2, $3)",
+            "INSERT INTO route_stops (route_id, stop_index, location_id, arrive_offset_min, depart_offset_min)
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(route_id)
         .bind(index as i16)
         .bind(location_id)
+        .bind(arrive)
+        .bind(depart)
         .execute(&mut *tx)
         .await?;
     }
@@ -177,12 +193,13 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<()> {
         first_trip_id.get_or_insert(trip_id);
 
         sqlx::query(
-            "INSERT INTO trips (id, route_id, resource_id, service_date, departs_at, segment_count)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO trips (id, route_id, resource_id, operator_id, service_number, service_date, departs_at, segment_count)
+             VALUES ($1, $2, $3, $4, 'LUL 501', $5, $6, $7)",
         )
         .bind(trip_id)
         .bind(route_id)
         .bind(resource_id)
+        .bind(operator_id)
         .bind(service_date)
         .bind(departs_at)
         .bind(SEGMENTS)
@@ -253,6 +270,10 @@ async fn seed_return_route(pool: &PgPool) -> anyhow::Result<()> {
             .fetch_one(&mut *tx)
             .await
             .context("outbound network must be seeded first")?;
+    let operator_id: Uuid = sqlx::query_scalar("SELECT id FROM operators WHERE code = 'LUL'")
+        .fetch_one(&mut *tx)
+        .await
+        .context("operator must be seeded first")?;
 
     let route_id = Uuid::new_v4();
     sqlx::query("INSERT INTO routes (id, code, name) VALUES ($1, 'CEB-BTG', 'Cebu – Batangas')")
@@ -260,13 +281,16 @@ async fn seed_return_route(pool: &PgPool) -> anyhow::Result<()> {
         .execute(&mut *tx)
         .await?;
     for (index, (code, _)) in STOPS.iter().rev().enumerate() {
+        let (arrive, depart) = STOP_SCHEDULE[index];
         sqlx::query(
-            "INSERT INTO route_stops (route_id, stop_index, location_id)
-             SELECT $1, $2, id FROM locations WHERE code = $3",
+            "INSERT INTO route_stops (route_id, stop_index, location_id, arrive_offset_min, depart_offset_min)
+             SELECT $1, $2, id, $4, $5 FROM locations WHERE code = $3",
         )
         .bind(route_id)
         .bind(index as i16)
         .bind(code)
+        .bind(arrive)
+        .bind(depart)
         .execute(&mut *tx)
         .await?;
     }
@@ -285,12 +309,13 @@ async fn seed_return_route(pool: &PgPool) -> anyhow::Result<()> {
             .and_utc();
         let trip_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO trips (id, route_id, resource_id, service_date, departs_at, segment_count)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO trips (id, route_id, resource_id, operator_id, service_number, service_date, departs_at, segment_count)
+             VALUES ($1, $2, $3, $4, 'LUL 502', $5, $6, $7)",
         )
         .bind(trip_id)
         .bind(route_id)
         .bind(resource_id)
+        .bind(operator_id)
         .bind(service_date)
         .bind(departs_at)
         .bind(SEGMENTS)

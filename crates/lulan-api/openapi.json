@@ -46,7 +46,7 @@
     },
     "/v1/trips/search": {
       "get": {
-        "summary": "Search trips with span-aware availability",
+        "summary": "Search a one-way or round-trip itinerary",
         "tags": [
           "trips"
         ],
@@ -70,12 +70,26 @@
             "example": "CEB"
           },
           {
-            "name": "date",
+            "name": "departure_date",
             "in": "query",
             "required": true,
             "schema": {
               "type": "string",
               "format": "date"
+            },
+            "description": "Outbound service date"
+          },
+          {
+            "name": "trip_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "one_way",
+                "round_trip"
+              ],
+              "default": "one_way"
             }
           },
           {
@@ -86,12 +100,12 @@
               "type": "string",
               "format": "date"
             },
-            "description": "Round-trip convenience: also search the reverse direction on this date (returned as return_trips)"
+            "description": "Required for round_trip, forbidden for one_way"
           }
         ],
         "responses": {
           "200": {
-            "description": "Matching departures with per-fare-class seat counts and pool capacity for the requested span",
+            "description": "Legs with candidate trips",
             "content": {
               "application/json": {
                 "schema": {
@@ -103,7 +117,8 @@
           "400": {
             "$ref": "#/components/responses/BadRequest"
           }
-        }
+        },
+        "description": "Returns candidate trips per leg (each enriched with operator, service number, vehicle, and schedule). Pick one trip per leg to build a journeys[] quote/order. Multi-city is composed client-side from several one-way searches."
       }
     },
     "/v1/trips/{trip_id}/availability": {
@@ -1546,124 +1561,44 @@
       "TripSearchResponse": {
         "type": "object",
         "properties": {
-          "trips": {
+          "trip_type": {
+            "type": "string",
+            "enum": [
+              "one_way",
+              "round_trip"
+            ]
+          },
+          "legs": {
             "type": "array",
+            "description": "One-way: 1 leg. Round-trip: outbound + return.",
             "items": {
               "type": "object",
               "properties": {
-                "trip_id": {
+                "leg": {
                   "type": "string",
-                  "format": "uuid"
+                  "enum": [
+                    "outbound",
+                    "return"
+                  ]
                 },
-                "route": {
+                "origin": {
                   "type": "string"
                 },
-                "vessel": {
+                "destination": {
                   "type": "string"
                 },
-                "departs_at": {
+                "date": {
                   "type": "string",
-                  "format": "date-time"
+                  "format": "date"
                 },
-                "from_index": {
-                  "type": "integer"
-                },
-                "to_index": {
-                  "type": "integer"
-                },
-                "seats": {
+                "trips": {
                   "type": "array",
                   "items": {
-                    "type": "object",
-                    "properties": {
-                      "fare_class": {
-                        "type": "string"
-                      },
-                      "total": {
-                        "type": "integer"
-                      },
-                      "available": {
-                        "type": "integer"
-                      }
-                    }
-                  }
-                },
-                "pools": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "code": {
-                        "type": "string"
-                      },
-                      "remaining": {
-                        "type": "integer"
-                      }
-                    }
+                    "$ref": "#/components/schemas/TripCandidate"
                   }
                 }
               }
             }
-          },
-          "return_trips": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "trip_id": {
-                  "type": "string",
-                  "format": "uuid"
-                },
-                "route": {
-                  "type": "string"
-                },
-                "vessel": {
-                  "type": "string"
-                },
-                "departs_at": {
-                  "type": "string",
-                  "format": "date-time"
-                },
-                "from_index": {
-                  "type": "integer"
-                },
-                "to_index": {
-                  "type": "integer"
-                },
-                "seats": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "fare_class": {
-                        "type": "string"
-                      },
-                      "total": {
-                        "type": "integer"
-                      },
-                      "available": {
-                        "type": "integer"
-                      }
-                    }
-                  }
-                },
-                "pools": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "code": {
-                        "type": "string"
-                      },
-                      "remaining": {
-                        "type": "integer"
-                      }
-                    }
-                  }
-                }
-              }
-            },
-            "description": "Present when return_date was given"
           }
         }
       },
@@ -1930,6 +1865,112 @@
                 },
                 "passenger_type": {
                   "$ref": "#/components/schemas/PassengerType"
+                }
+              }
+            }
+          }
+        }
+      },
+      "TripCandidate": {
+        "type": "object",
+        "properties": {
+          "trip_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "route_code": {
+            "type": "string"
+          },
+          "operator": {
+            "type": "object",
+            "description": "Carrier/agency; omitted if unassigned",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "service_number": {
+            "type": "string",
+            "description": "Passenger-facing service designator (flight/service number)",
+            "example": "LUL 501"
+          },
+          "vehicle": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "bus",
+                  "ferry",
+                  "aircraft",
+                  "other"
+                ]
+              }
+            }
+          },
+          "origin": {
+            "type": "string"
+          },
+          "destination": {
+            "type": "string"
+          },
+          "departs_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Departure from the requested origin (UTC)"
+          },
+          "arrives_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Arrival at the requested destination (UTC); omitted if no schedule"
+          },
+          "duration_minutes": {
+            "type": "integer",
+            "description": "Journey time for the span; omitted if no schedule"
+          },
+          "from_index": {
+            "type": "integer"
+          },
+          "to_index": {
+            "type": "integer"
+          },
+          "seats": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fare_class": {
+                  "type": "string"
+                },
+                "available": {
+                  "type": "integer"
+                },
+                "total": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "pools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "remaining": {
+                  "type": "integer"
                 }
               }
             }

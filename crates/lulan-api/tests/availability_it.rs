@@ -87,13 +87,20 @@ async fn availability_answers_the_prd_example_over_http() {
     // fare summary must count seats for the exact requested span.
     let (status, body) = get_json(
         &app,
-        &format!("/v1/trips/search?origin=BTG&destination=CEB&date={date}"),
+        &format!("/v1/trips/search?origin=BTG&destination=CEB&departure_date={date}"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let trips = body["trips"].as_array().unwrap();
-    assert!(!trips.is_empty(), "search must find the seeded sailing");
+    assert_eq!(body["trip_type"], "one_way");
+    let trips = body["legs"][0]["trips"].as_array().unwrap();
+    assert!(!trips.is_empty(), "search must find the seeded departure");
     let hit = &trips[0];
+    // Enriched identity + schedule (Phase: search rework).
+    assert_eq!(hit["operator"]["code"], "LUL");
+    assert_eq!(hit["service_number"], "LUL 501");
+    assert_eq!(hit["vehicle"]["name"], "MV Lulan One");
+    assert!(hit["arrives_at"].is_string(), "schedule yields an arrival");
+    assert_eq!(hit["duration_minutes"], 780);
     assert_eq!(hit["trip_id"].as_str().unwrap(), trip_id);
     assert_eq!(hit["from_index"], 0);
     assert_eq!(hit["to_index"], 3);

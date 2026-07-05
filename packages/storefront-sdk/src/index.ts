@@ -6,8 +6,9 @@
  *
  * ```ts
  * const lulan = new LulanClient({ baseUrl: "https://api.operator.example" });
- * const { trips } = await lulan.searchTrips({ origin: "BTG", destination: "CEB", date: "2026-07-11" });
- * const quote = await lulan.createQuote({ trip_id: trips[0].trip_id, items: [...] });
+ * const { legs } = await lulan.searchTrips({ origin: "BTG", destination: "CEB", departure_date: "2026-07-11" });
+ * const outbound = legs[0].trips[0];
+ * const quote = await lulan.createQuote({ trip_id: outbound.trip_id, items: [...] });
  * const order = await lulan.createOrder({ ... , quote_token: quote.quote_token },
  *                                        { idempotencyKey: crypto.randomUUID() });
  * ```
@@ -33,12 +34,15 @@ export interface Passenger {
   birthdate?: string;
 }
 
+export type TripType = "one_way" | "round_trip";
+
 export interface TripSearchParams {
   origin: string;
   destination: string;
-  /** ISO date (YYYY-MM-DD). */
-  date: string;
-  /** Round-trip convenience: also search the reverse direction on this date. */
+  /** Outbound service date (YYYY-MM-DD). */
+  departure_date: string;
+  trip_type?: TripType;
+  /** Required for round_trip, forbidden for one_way. */
   return_date?: string;
 }
 
@@ -53,15 +57,50 @@ export interface PoolAvailability {
   remaining: number;
 }
 
-export interface TripHit {
+export interface Operator {
+  code: string;
+  name: string;
+}
+
+export interface Vehicle {
+  code: string;
+  name: string;
+  kind: "bus" | "ferry" | "aircraft" | "other";
+}
+
+export interface TripCandidate {
   trip_id: string;
-  route: string;
-  vessel: string;
+  route_code: string;
+  /** Carrier; absent if unassigned. */
+  operator?: Operator;
+  /** Passenger-facing service designator (flight/service number). */
+  service_number?: string;
+  vehicle: Vehicle;
+  origin: string;
+  destination: string;
+  /** Departure from the requested origin (UTC ISO). */
   departs_at: string;
+  /** Arrival at the requested destination (UTC ISO); absent if no schedule. */
+  arrives_at?: string;
+  duration_minutes?: number;
   from_index: number;
   to_index: number;
   seats: FareClassAvailability[];
   pools: PoolAvailability[];
+}
+
+export interface SearchLeg {
+  leg: "outbound" | "return";
+  origin: string;
+  destination: string;
+  date: string;
+  trips: TripCandidate[];
+}
+
+export interface TripSearchResult {
+  trip_type: TripType;
+  /** One-way: 1 leg. Round-trip: outbound + return. */
+  legs: SearchLeg[];
 }
 
 export interface SeatAvailability {
@@ -328,10 +367,7 @@ export class LulanClient {
 
   // ---- trips ----------------------------------------------------------
 
-  searchTrips(
-    params: TripSearchParams,
-    options?: RequestOptions,
-  ): Promise<{ trips: TripHit[]; return_trips?: TripHit[] }> {
+  searchTrips(params: TripSearchParams, options?: RequestOptions): Promise<TripSearchResult> {
     const query = new URLSearchParams(
       Object.fromEntries(Object.entries(params).filter(([, v]) => v !== undefined)),
     );

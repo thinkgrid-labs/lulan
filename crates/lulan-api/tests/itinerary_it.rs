@@ -359,14 +359,31 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
     let (status, search) = call(
         &app,
         "GET",
-        &format!("/v1/trips/search?origin=BTG&destination=CEB&date={date}&return_date={date}"),
+        &format!("/v1/trips/search?origin=BTG&destination=CEB&departure_date={date}&trip_type=round_trip&return_date={date}"),
         None,
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!search["trips"].as_array().unwrap().is_empty());
+    assert_eq!(search["trip_type"], "round_trip");
+    let legs = search["legs"].as_array().unwrap();
+    assert_eq!(legs.len(), 2, "outbound + return legs");
+    assert_eq!(legs[0]["leg"], "outbound");
+    assert_eq!(legs[1]["leg"], "return");
+    assert!(!legs[0]["trips"].as_array().unwrap().is_empty());
     assert!(
-        !search["return_trips"].as_array().unwrap().is_empty(),
+        !legs[1]["trips"].as_array().unwrap().is_empty(),
         "return candidates present: {search}"
     );
+
+    // round_trip without a return_date is a 400.
+    let (status, _) = call(
+        &app,
+        "GET",
+        &format!(
+            "/v1/trips/search?origin=BTG&destination=CEB&departure_date={date}&trip_type=round_trip"
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
