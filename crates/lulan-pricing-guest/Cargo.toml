@@ -1,0 +1,16 @@
+[package]
+name = "lulan-pricing-guest"
+description = "Reference WASM pricing module implementing lulan:pricing (build with --target wasm32-unknown-unknown)"
+license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+lulan-pricing = { path = "../lulan-pricing", default-features = false }
+serde_json = { workspace = true }

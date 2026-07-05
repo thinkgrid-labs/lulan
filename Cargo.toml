@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/lulan-engine",
     "crates/lulan-pricing",
+    "crates/lulan-pricing-guest",
     "crates/lulan-validate",
     "crates/lulan-api",
     "crates/lulan-loadgen",
@@ -22,7 +23,11 @@ lulan-validate = { path = "crates/lulan-validate" }
 
 anyhow = "1"
 axum = { version = "0.8", features = ["http2"] }
+base64 = "0.22"
+hmac = "0.12"
 proptest = "1"
+sha2 = "0.10"
+wasmtime = "41"
 rand = "0.9"
 redis = { version = "0.32", features = ["tokio-comp", "connection-manager", "script"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }

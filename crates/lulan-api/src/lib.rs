@@ -4,6 +4,9 @@
 pub mod config;
 pub mod error;
 pub mod health;
+pub mod orders;
+pub mod pricing;
+pub mod quotes;
 pub mod reservations;
 pub mod seed;
 pub mod state;
@@ -31,6 +34,15 @@ pub fn router(state: AppState) -> Router {
             post(reservations::create_claim),
         )
         .route("/v1/holds/{hold_id}", delete(reservations::release_hold))
+        .route("/v1/quotes", post(quotes::create))
+        .route("/v1/orders", post(orders::create))
+        .route("/v1/orders/{order_id}", get(orders::get))
+        .route(
+            "/v1/orders/{order_id}/payment",
+            post(orders::request_payment),
+        )
+        .route("/v1/orders/{order_id}/cancel", post(orders::cancel))
+        .route("/v1/payments/fake/webhook", post(orders::fake_webhook))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -44,10 +56,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoints_respond_without_a_database() {
-        let app = router(AppState {
-            db: None,
-            redis: None,
-        });
+        let app = router(AppState::new(None, None));
 
         for path in ["/health/live", "/health/ready"] {
             let response = app
@@ -61,10 +70,7 @@ mod tests {
 
     #[tokio::test]
     async fn trip_endpoints_report_unavailable_without_a_database() {
-        let app = router(AppState {
-            db: None,
-            redis: None,
-        });
+        let app = router(AppState::new(None, None));
         let response = app
             .oneshot(
                 Request::builder()

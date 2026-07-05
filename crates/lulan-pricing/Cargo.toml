@@ -1,6 +1,6 @@
 [package]
 name = "lulan-pricing"
-description = "Lulan pricing: PricingEngine trait with native and WASM (wasmtime) implementations"
+description = "Lulan pricing: deterministic rule core, native engine, and wasmtime module host"
 license = "AGPL-3.0-only"
 version.workspace = true
 edition.workspace = true
@@ -8,7 +8,17 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# `host` pulls in wasmtime; pricing modules depend on this crate with
+# `default-features = false` to get only the pure rules core.
+default = ["host"]
+host = ["dep:wasmtime"]
+
 [dependencies]
-lulan-engine = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+wasmtime = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

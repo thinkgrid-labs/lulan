@@ -1,0 +1,91 @@
+// Lulan pricing module interface (ADR 0003).
+//
+// This WIT file is the semantic contract a pricing module implements. The
+// v1 host loads CORE wasm modules (not yet components) with the JSON ABI
+// described at the bottom; the types here define the shapes those JSON
+// payloads encode. When the host migrates to the component model, modules
+// written against this file are source-compatible.
+
+package lulan:pricing@0.1.0;
+
+interface types {
+    /// Money is integer minor units (e.g. centavos). Never floats.
+    type minor-units = s64;
+    /// Basis points: 10000 = 100%.
+    type basis-points = s64;
+
+    record occupancy-tier {
+        /// Applies when occupancy is at least this (0–10000 bp).
+        min-occupancy-bp: basis-points,
+        surcharge-bp: basis-points,
+    }
+
+    record advance-tier {
+        /// Applies when booking at least this many days before departure.
+        min-days: s32,
+        discount-bp: basis-points,
+    }
+
+    /// The operator's fare policy, delivered verbatim to the module.
+    record fare-rule-set {
+        currency: string,
+        /// fare key (seat fare class or pool code) -> minor units/segment
+        base-fare-per-segment: list<tuple<string, minor-units>>,
+        /// weekdays (0 = Monday .. 6 = Sunday) attracting the surcharge
+        peak-weekdays: list<u8>,
+        peak-surcharge-bp: basis-points,
+        occupancy-tiers: list<occupancy-tier>,
+        advance-purchase-tiers: list<advance-tier>,
+        /// promo code -> discount bp
+        promos: list<tuple<string, basis-points>>,
+    }
+
+    /// Host-derived scalars for one line item. Modules receive NO clock,
+    /// NO occupancy query, NO I/O — everything they may depend on is here.
+    record rule-input {
+        fare-key: string,
+        segments: u8,
+        quantity: s32,
+        weekday: u8,
+        days-before-departure: s32,
+        occupancy-bp: basis-points,
+        promo-code: option<string>,
+    }
+
+    record adjustment {
+        label: string,
+        amount-minor: minor-units,
+    }
+
+    record quote {
+        currency: string,
+        base-minor: minor-units,
+        adjustments: list<adjustment>,
+        total-minor: minor-units,
+    }
+}
+
+world pricing-module {
+    use types.{fare-rule-set, rule-input, quote};
+
+    /// Evaluate one line item. MUST be pure and deterministic: same
+    /// (rules, input) -> same quote, on every host, forever. The host
+    /// fuel-meters and memory-caps every call.
+    export price: func(rules: fare-rule-set, input: rule-input) -> result<quote, string>;
+}
+
+// ---------------------------------------------------------------------------
+// v1 core-wasm ABI (until the component-model host lands)
+//
+// A module exports:
+//   memory : linear memory
+//   alloc  : func(len: i32) -> i32        ; host requests a request buffer
+//   price  : func(ptr: i32, len: i32) -> i64
+//
+// The host writes the JSON encoding of `{ "rules": fare-rule-set,
+// "input": rule-input }` (field names snake_case, records as objects,
+// list<tuple<K,V>> as objects) at `ptr`. The module returns
+// `(response_ptr << 32) | response_len` pointing at the JSON encoding of
+// `{ "ok": quote }` or `{ "err": string }`. See lulan-pricing-guest for a
+// complete reference implementation.
+// ---------------------------------------------------------------------------

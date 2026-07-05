@@ -20,7 +20,47 @@ const STOPS: [(&str, &str); 4] = [
 const SEGMENTS: i16 = 3;
 const DAYS: i64 = 7;
 
+/// Default fare policy for the demo network. Idempotent.
+async fn seed_fare_rules(pool: &PgPool) -> anyhow::Result<()> {
+    let existing = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fare_rules WHERE active")
+        .fetch_one(pool)
+        .await?;
+    if existing > 0 {
+        return Ok(());
+    }
+    let rules = serde_json::json!({
+        "currency": "PHP",
+        "base_fare_per_segment": {
+            "economy": 15_000,
+            "business": 30_000,
+            "VEHICLE_DECK": 100_000,
+            "CARGO_KG": 500,
+        },
+        "peak_weekdays": [4, 5, 6],
+        "peak_surcharge_bp": 1_500,
+        "occupancy_tiers": [
+            {"min_occupancy_bp": 5_000, "surcharge_bp": 1_000},
+            {"min_occupancy_bp": 8_000, "surcharge_bp": 2_500},
+        ],
+        "advance_purchase_tiers": [
+            {"min_days": 7, "discount_bp": 1_000},
+            {"min_days": 14, "discount_bp": 2_000},
+        ],
+        "promos": {"BAGONGBYAHE": 500},
+    });
+    // Fail fast if the JSON ever drifts from the engine's schema.
+    let _: lulan_pricing::rules::FareRuleSet = serde_json::from_value(rules.clone())?;
+    sqlx::query("INSERT INTO fare_rules (id, active, rules) VALUES ($1, true, $2)")
+        .bind(Uuid::new_v4())
+        .bind(rules)
+        .execute(pool)
+        .await?;
+    println!("seeded default fare rules");
+    Ok(())
+}
+
 pub async fn seed(pool: &PgPool) -> anyhow::Result<()> {
+    seed_fare_rules(pool).await?;
     let already =
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM routes WHERE code = 'BTG-CEB'")
             .fetch_one(pool)

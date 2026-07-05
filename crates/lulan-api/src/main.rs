@@ -9,7 +9,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lulan_api=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "lulan_api=info,lulan_engine=info,tower_http=info".into()),
         )
         .init();
 
@@ -51,7 +51,57 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let app = router(AppState { db, redis });
+    // Background machinery (needs a database): outbox relay delivering
+    // events to the sink, and the sweeper expiring unpaid orders.
+    if let Some(pool) = &db {
+        tokio::spawn(lulan_engine::events::run_relay(
+            pool.clone(),
+            lulan_engine::events::TracingSink,
+            std::time::Duration::from_secs(2),
+        ));
+        let sweeper_store = lulan_engine::orders::OrderStore::new(pool.clone());
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match sweeper_store.expire_due().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(expired = n, "expired overdue orders"),
+                    Err(err) => tracing::error!(error = %err, "order expiry sweep failed"),
+                }
+            }
+        });
+    }
+
+    // Pricing engine: an operator-supplied WASM module (the ADR 0003
+    // plugin path — a runtime artifact, not an image layer) or native.
+    let pricing: std::sync::Arc<dyn lulan_pricing::PricingEngine> = match &config.pricing_wasm {
+        Some(path) => {
+            let engine = lulan_pricing::WasmEngine::from_file(std::path::Path::new(path))?;
+            tracing::info!(module = %path, "pricing: WASM module loaded");
+            std::sync::Arc::new(engine)
+        }
+        None => {
+            tracing::info!("pricing: native rule engine");
+            std::sync::Arc::new(lulan_pricing::NativeEngine)
+        }
+    };
+
+    let quote_secret = std::sync::Arc::new(match &config.quote_secret {
+        Some(secret) => secret.as_bytes().to_vec(),
+        None => {
+            tracing::warn!("LULAN_QUOTE_SECRET not set — quotes won't survive restarts");
+            lulan_api::state::ephemeral_secret()
+        }
+    });
+
+    let app = router(AppState {
+        db,
+        redis,
+        pricing,
+        quote_secret,
+    });
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!(addr = %config.listen_addr, "lulan-api listening");

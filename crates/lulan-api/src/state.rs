@@ -1,6 +1,11 @@
+use std::sync::Arc;
+
 use lulan_engine::inventory::{HoldStore, InventoryStore};
+use lulan_engine::orders::OrderStore;
+use lulan_pricing::{NativeEngine, PricingEngine};
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::error::ApiError;
 
@@ -12,13 +17,36 @@ pub struct AppState {
     /// Optional by design, not just for dev: holds degrade to 503 while
     /// claims stay correct (ADR 0002).
     pub redis: Option<ConnectionManager>,
+    /// The active pricing engine — native by default, an operator WASM
+    /// module when `LULAN_PRICING_WASM` is set (ADR 0003).
+    pub pricing: Arc<dyn PricingEngine>,
+    /// HMAC key for quote tokens.
+    pub quote_secret: Arc<Vec<u8>>,
 }
 
 impl AppState {
+    /// Native pricing engine and an ephemeral quote secret — what tests
+    /// and infra-less boots want.
+    pub fn new(db: Option<PgPool>, redis: Option<ConnectionManager>) -> Self {
+        Self {
+            db,
+            redis,
+            pricing: Arc::new(NativeEngine),
+            quote_secret: Arc::new(ephemeral_secret()),
+        }
+    }
+
     pub fn inventory(&self) -> Result<InventoryStore, ApiError> {
         self.db
             .clone()
             .map(InventoryStore::new)
+            .ok_or(ApiError::ServiceUnavailable("database not configured"))
+    }
+
+    pub fn orders(&self) -> Result<OrderStore, ApiError> {
+        self.db
+            .clone()
+            .map(OrderStore::new)
             .ok_or(ApiError::ServiceUnavailable("database not configured"))
     }
 
@@ -30,4 +58,12 @@ impl AppState {
                 "hold service unavailable (no Redis)",
             ))
     }
+}
+
+/// 32 random bytes. Quotes signed with an ephemeral secret die on restart,
+/// which is fine — clients just re-quote.
+pub fn ephemeral_secret() -> Vec<u8> {
+    let mut secret = Uuid::new_v4().into_bytes().to_vec();
+    secret.extend_from_slice(&Uuid::new_v4().into_bytes());
+    secret
 }

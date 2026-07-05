@@ -56,10 +56,7 @@ async fn availability_answers_the_prd_example_over_http() {
     let trip_id: String = row.get(0);
     let date: String = row.get(1);
 
-    let app = lulan_api::router(AppState {
-        db: Some(pool.clone()),
-        redis: None,
-    });
+    let app = lulan_api::router(AppState::new(Some(pool.clone()), None));
 
     // Search: full-journey availability must see 12A as unavailable and the
     // fare summary must count seats for the exact requested span.

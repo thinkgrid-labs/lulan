@@ -19,8 +19,6 @@ use crate::inventory::{
     release_seat_exec,
 };
 
-/// Placeholder flat fare until the pricing engine lands (Phase 4).
-pub const PLACEHOLDER_FARE_MINOR: i64 = 50_000; // ₱500.00 per item
 pub const CURRENCY: &str = "PHP";
 /// How long claims stay provisional awaiting payment.
 pub const ORDER_TTL_MINUTES: i64 = 15;
@@ -31,6 +29,9 @@ pub struct NewOrderItem {
     pub origin: String,
     pub destination: String,
     pub quantity: i32,
+    /// Priced by the caller (live engine quote or verified quote token) —
+    /// the order engine records money, it never computes it.
+    pub price_minor: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +41,7 @@ pub struct OrderItem {
     pub from_index: u8,
     pub to_index: u8,
     pub quantity: i32,
+    pub price_minor: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,9 +62,13 @@ pub struct OrderRecord {
 pub enum CreateOutcome {
     Created(OrderRecord),
     /// A claim lost the race; nothing was written.
-    Conflict { unit_code: String },
+    Conflict {
+        unit_code: String,
+    },
     /// Trip or a unit doesn't exist.
-    NotFound { what: String },
+    NotFound {
+        what: String,
+    },
 }
 
 /// Result of a lifecycle transition.
@@ -121,7 +127,7 @@ impl OrderStore {
 
         let order_id = Uuid::new_v4();
         let expires_at = Utc::now() + chrono::Duration::minutes(ORDER_TTL_MINUTES);
-        let total_minor = PLACEHOLDER_FARE_MINOR * items.len() as i64;
+        let total_minor: i64 = items.iter().map(|i| i.price_minor).sum();
 
         let mut tx = self.pool.begin().await?;
 
@@ -147,8 +153,14 @@ impl OrderStore {
                     if item.quantity <= 0 {
                         0
                     } else {
-                        claim_pool_exec(&mut *tx, trip_id, target.unit_id, target.span, item.quantity)
-                            .await?
+                        claim_pool_exec(
+                            &mut *tx,
+                            trip_id,
+                            target.unit_id,
+                            target.span,
+                            item.quantity,
+                        )
+                        .await?
                     }
                 }
             };
@@ -159,8 +171,8 @@ impl OrderStore {
                 });
             }
             sqlx::query(
-                "INSERT INTO order_items (order_id, unit_id, unit_code, kind, from_index, to_index, quantity)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                "INSERT INTO order_items (order_id, unit_id, unit_code, kind, from_index, to_index, quantity, price_minor)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
             .bind(order_id)
             .bind(target.unit_id)
@@ -169,6 +181,7 @@ impl OrderStore {
             .bind(i16::from(target.span.from_index()))
             .bind(i16::from(target.span.to_index()))
             .bind(item.quantity.max(1))
+            .bind(item.price_minor)
             .execute(&mut *tx)
             .await?;
             recorded_items.push(OrderItem {
@@ -177,6 +190,7 @@ impl OrderStore {
                 from_index: target.span.from_index(),
                 to_index: target.span.to_index(),
                 quantity: item.quantity.max(1),
+                price_minor: item.price_minor,
             });
         }
 
@@ -186,7 +200,7 @@ impl OrderStore {
                 json!({
                     "unit_code": i.unit_code, "kind": i.kind,
                     "from_index": i.from_index, "to_index": i.to_index,
-                    "quantity": i.quantity,
+                    "quantity": i.quantity, "price_minor": i.price_minor,
                 })
             })
             .collect();
@@ -242,11 +256,13 @@ impl OrderStore {
             )
             .await?;
         if let TransitionOutcome::Applied(_) = outcome {
-            sqlx::query("UPDATE orders SET payment_intent_id = $2, updated_at = now() WHERE id = $1")
-                .bind(order_id)
-                .bind(payment_intent_id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE orders SET payment_intent_id = $2, updated_at = now() WHERE id = $1",
+            )
+            .bind(order_id)
+            .bind(payment_intent_id)
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
         Ok(outcome)
@@ -259,12 +275,11 @@ impl OrderStore {
         payment_intent_id: &str,
         succeeded: bool,
     ) -> Result<TransitionOutcome, StoreError> {
-        let Some(order_id) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM orders WHERE payment_intent_id = $1",
-        )
-        .bind(payment_intent_id)
-        .fetch_optional(&self.pool)
-        .await?
+        let Some(order_id) =
+            sqlx::query_scalar::<_, Uuid>("SELECT id FROM orders WHERE payment_intent_id = $1")
+                .bind(payment_intent_id)
+                .fetch_optional(&self.pool)
+                .await?
         else {
             return Ok(TransitionOutcome::NotFound);
         };
@@ -381,7 +396,7 @@ impl OrderStore {
         };
 
         let item_rows = sqlx::query(
-            "SELECT unit_code, kind, from_index, to_index, quantity
+            "SELECT unit_code, kind, from_index, to_index, quantity, price_minor
              FROM order_items WHERE order_id = $1 ORDER BY unit_code",
         )
         .bind(order_id)
@@ -407,6 +422,7 @@ impl OrderStore {
                         from_index: r.try_get::<i16, _>("from_index")? as u8,
                         to_index: r.try_get::<i16, _>("to_index")? as u8,
                         quantity: r.try_get("quantity")?,
+                        price_minor: r.try_get("price_minor")?,
                     })
                 })
                 .collect::<Result<Vec<_>, sqlx::Error>>()?,
@@ -425,7 +441,10 @@ impl OrderStore {
             let event_type = OrderEventType::parse(&event.event_type)
                 .unwrap_or_else(|| panic!("unknown event type {:?} in stream", event.event_type));
             state = Some(apply(state, event_type).unwrap_or_else(|e| {
-                panic!("stored stream must replay cleanly, got {e} at seq {}", event.stream_seq)
+                panic!(
+                    "stored stream must replay cleanly, got {e} at seq {}",
+                    event.stream_seq
+                )
             }));
         }
         Ok(state)

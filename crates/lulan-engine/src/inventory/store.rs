@@ -86,7 +86,16 @@ pub struct ClaimTarget {
     pub unit_id: Uuid,
     /// `"seat"` or `"pool"` (matches the capacity_units CHECK constraint).
     pub kind: String,
+    /// Set for seats; None for pools.
+    pub fare_class: Option<String>,
     pub span: SegmentSpan,
+}
+
+impl ClaimTarget {
+    /// The pricing lookup key: a seat's fare class, or the pool's own code.
+    pub fn fare_key<'a>(&'a self, unit_code: &'a str) -> &'a str {
+        self.fare_class.as_deref().unwrap_or(unit_code)
+    }
 }
 
 #[derive(Clone)]
@@ -110,7 +119,7 @@ impl InventoryStore {
     ) -> Result<Option<ClaimTarget>, StoreError> {
         let Some(row) = sqlx::query(
             r#"
-            SELECT cu.id AS unit_id, cu.kind, t.route_id
+            SELECT cu.id AS unit_id, cu.kind, cu.fare_class, t.route_id
             FROM trips t
             JOIN capacity_units cu
               ON cu.resource_id = t.resource_id AND cu.code = $2
@@ -130,8 +139,67 @@ impl InventoryStore {
         Ok(Some(ClaimTarget {
             unit_id: row.try_get("unit_id")?,
             kind: row.try_get("kind")?,
+            fare_class: row.try_get("fare_class")?,
             span,
         }))
+    }
+
+    /// How sold this unit's fare bucket is for the span, in basis points
+    /// (0–10000) — the demand input for occupancy pricing. Seats measure
+    /// their fare class across the vessel; pools measure their own fill.
+    pub async fn span_occupancy_bp(
+        &self,
+        trip_id: Uuid,
+        unit_id: Uuid,
+        kind: &str,
+        span: SegmentSpan,
+    ) -> Result<i64, StoreError> {
+        if kind == "seat" {
+            let row = sqlx::query(
+                r#"
+                SELECT count(*) FILTER (WHERE (so.occupied_mask & $3) <> 0) AS sold,
+                       count(*) AS total
+                FROM seat_occupancy so
+                JOIN capacity_units cu ON cu.id = so.unit_id
+                WHERE so.trip_id = $1
+                  AND cu.fare_class = (SELECT fare_class FROM capacity_units WHERE id = $2)
+                "#,
+            )
+            .bind(trip_id)
+            .bind(unit_id)
+            .bind(span.mask() as i64)
+            .fetch_one(&self.pool)
+            .await?;
+            let sold: i64 = row.try_get("sold")?;
+            let total: i64 = row.try_get("total")?;
+            Ok(if total == 0 { 0 } else { sold * 10_000 / total })
+        } else {
+            let Some(row) = sqlx::query(
+                r#"
+                SELECT (SELECT min(x) FROM unnest(po.remaining[$3:$4]) AS x) AS remaining,
+                       cu.pool_capacity
+                FROM pool_occupancy po
+                JOIN capacity_units cu ON cu.id = po.unit_id
+                WHERE po.trip_id = $1 AND po.unit_id = $2
+                "#,
+            )
+            .bind(trip_id)
+            .bind(unit_id)
+            .bind(i32::from(span.from_index()) + 1)
+            .bind(i32::from(span.to_index()))
+            .fetch_optional(&self.pool)
+            .await?
+            else {
+                return Ok(0);
+            };
+            let remaining: i32 = row.try_get::<Option<i32>, _>("remaining")?.unwrap_or(0);
+            let capacity: i32 = row.try_get::<Option<i32>, _>("pool_capacity")?.unwrap_or(0);
+            Ok(if capacity <= 0 {
+                0
+            } else {
+                (capacity - remaining) as i64 * 10_000 / capacity as i64
+            })
+        }
     }
 
     /// Current occupancy mask for one seat, reinterpreted as u64.
