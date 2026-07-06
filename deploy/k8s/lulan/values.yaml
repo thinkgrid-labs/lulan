@@ -1,0 +1,50 @@
+replicaCount: 2
+
+image:
+  repository: lulan-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# External services — Lulan never bundles databases in Kubernetes.
+# Either put URLs here (templated into a Secret), or set
+# existingSecret to a Secret exposing DATABASE_URL / REDIS_URL /
+# LULAN_QUOTE_SECRET / LULAN_BOOTSTRAP_ADMIN_KEY keys.
+database:
+  url: ""            # postgres://user:pass@host:5432/lulan
+redis:
+  url: ""            # redis://host:6379 (optional; holds degrade without it)
+secrets:
+  quoteSecret: ""
+  bootstrapAdminKey: ""
+existingSecret: ""   # takes precedence over the values above
+
+env:
+  RUST_LOG: lulan_api=info,lulan_engine=info
+  LULAN_RATE_LIMIT: "300"
+  LULAN_HOLD_DEFAULT_TTL_SECS: "600"
+  LULAN_HOLD_MAX_TTL_SECS: "1800"
+  LULAN_DB_POOL: "32"
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  host: book.example.com
+  tls: []
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70

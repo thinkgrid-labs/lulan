@@ -1,0 +1,7 @@
+trip_id,arrival_time,departure_time,stop_id,stop_sequence
+NX-AM,06:00:00,06:00:00,PRT1,1
+NX-AM,08:30:00,08:45:00,PRT2,2
+NX-AM,11:00:00,11:00:00,PRT3,3
+NX-BACK,14:00:00,14:00:00,PRT3,1
+NX-BACK,16:15:00,16:30:00,PRT2,2
+NX-BACK,19:00:00,19:00:00,PRT1,3

@@ -1,0 +1,10 @@
+# TLS is automatic (Let's Encrypt) for the domain in .env.
+{$LULAN_DOMAIN} {
+	encode gzip
+
+	# Never expose operational endpoints publicly.
+	@internal path /metrics
+	respond @internal 403
+
+	reverse_proxy api:8080
+}

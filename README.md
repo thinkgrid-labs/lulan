@@ -102,6 +102,7 @@ Run the test suite and the concurrency harness:
 ```bash
 just check                 # fmt + clippy + full test suite
 just loadgen 10000 0.5     # 10k contenders, 50% via holds — expect 0 double-sells
+just loadgen-paced 200 30  # open-loop 200 req/s — honest seat-lock latencies
 ```
 
 ## API overview
@@ -174,6 +175,9 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] Itineraries: one-way, round-trip & multi-city (one atomic order across legs, round-trip fares)
 - [x] Itinerary holds: one hold across all legs, TTL auto-release, live held-seat map
 - [x] Ancillaries: operator add-on catalog (baggage, meals, insurance) priced into quotes & orders
+- [x] Production deploys: Compose (external or bundled databases, auto-TLS) + Helm chart
+- [x] GTFS importer — bring your existing schedule feed
+- [x] Open-loop benchmark mode (published seat-lock latencies vs the <20 ms target)
 - [ ] Admin operations API: staff RBAC (IdP-backed), schedules/fares/refunds, `@lulan/admin-sdk`
 - [ ] Reference Next.js storefront + React Native boarding-crew app
 - [ ] `@lulan/validate` npm package (WASM build of the validator)

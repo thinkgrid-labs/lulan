@@ -1,0 +1,69 @@
+# Lulan production stack — API + Caddy (auto-TLS).
+#
+# Databases are EXTERNAL by default: point DATABASE_URL / REDIS_URL at
+# your managed PostgreSQL and Redis (RDS, Cloud SQL, ElastiCache, your own
+# boxes…). For a self-contained single machine, add the bundled overlay:
+#
+#   external DBs:  docker compose -f production.yml up -d
+#   bundled DBs:   docker compose -f production.yml -f bundled-db.yml up -d
+#
+# See deploy/README.md for install, backup, restore, and upgrades.
+
+name: lulan
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      LULAN_DOMAIN: ${LULAN_DOMAIN:?set LULAN_DOMAIN in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
+    image: ${LULAN_IMAGE:-lulan-api:latest}
+    restart: unless-stopped
+    environment:
+      # External services — full connection URLs from .env. Falls back to
+      # the bundled-db overlay's containers when only POSTGRES_PASSWORD
+      # is set.
+      DATABASE_URL: ${DATABASE_URL:-postgres://lulan:${POSTGRES_PASSWORD:-}@postgres:5432/lulan}
+      # Optional: without Redis, soft holds and rate limiting degrade;
+      # bookings stay correct (ADR 0002).
+      REDIS_URL: ${REDIS_URL:-}
+      LULAN_LISTEN_ADDR: 0.0.0.0:8080
+      LULAN_QUOTE_SECRET: ${LULAN_QUOTE_SECRET:?set LULAN_QUOTE_SECRET in .env}
+      LULAN_BOOTSTRAP_ADMIN_KEY: ${LULAN_BOOTSTRAP_ADMIN_KEY:?set LULAN_BOOTSTRAP_ADMIN_KEY in .env}
+      # Optional: customer identity (HS256 JWT from your IdP)
+      LULAN_IDP_ISSUER: ${LULAN_IDP_ISSUER:-}
+      LULAN_IDP_HS256_SECRET: ${LULAN_IDP_HS256_SECRET:-}
+      # Optional: operator pricing module (mount it below)
+      LULAN_PRICING_WASM: ${LULAN_PRICING_WASM:-}
+      # Tuning
+      LULAN_RATE_LIMIT: ${LULAN_RATE_LIMIT:-300}
+      LULAN_HOLD_DEFAULT_TTL_SECS: ${LULAN_HOLD_DEFAULT_TTL_SECS:-600}
+      LULAN_HOLD_MAX_TTL_SECS: ${LULAN_HOLD_MAX_TTL_SECS:-1800}
+      LULAN_DB_POOL: ${LULAN_DB_POOL:-32}
+      RUST_LOG: ${RUST_LOG:-lulan_api=info,lulan_engine=info}
+    volumes:
+      # WASM pricing modules are runtime artifacts, not image layers —
+      # drop a module here and point LULAN_PRICING_WASM at it.
+      - ./modules:/modules:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  caddy_data:
+  caddy_config:

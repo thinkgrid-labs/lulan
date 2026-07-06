@@ -24,6 +24,40 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if std::env::args().nth(1).as_deref() == Some("import-gtfs") {
+        let args: Vec<String> = std::env::args().collect();
+        let dir = args
+            .get(2)
+            .filter(|a| !a.starts_with("--"))
+            .context("usage: lulan-api import-gtfs <dir> [--days N] [--seats N] [--vessel CODE]")?;
+        let mut options = lulan_api::gtfs::GtfsOptions::default();
+        let mut i = 3;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--days" => {
+                    options.days = args.get(i + 1).context("--days needs a value")?.parse()?;
+                    i += 2;
+                }
+                "--seats" => {
+                    options.seats = args.get(i + 1).context("--seats needs a value")?.parse()?;
+                    i += 2;
+                }
+                "--vessel" => {
+                    options.vessel =
+                        Some(args.get(i + 1).context("--vessel needs a value")?.clone());
+                    i += 2;
+                }
+                other => anyhow::bail!("unknown flag {other}"),
+            }
+        }
+        let url = config
+            .database_url
+            .context("DATABASE_URL is required for import")?;
+        let pool = connect(&url).await?;
+        lulan_api::gtfs::import(&pool, std::path::Path::new(dir), options).await?;
+        return Ok(());
+    }
+
     let db = match &config.database_url {
         Some(url) => Some(connect(url).await?),
         None => {

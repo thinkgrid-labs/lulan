@@ -1,0 +1,4 @@
+stop_id,stop_name,stop_lat,stop_lon
+PRT1,North Port,14.1,121.1
+PRT2,Mid Harbour,13.2,122.4
+PRT3,South Quay,12.4,123.0

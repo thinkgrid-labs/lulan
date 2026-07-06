@@ -5,6 +5,7 @@ pub mod ancillaries;
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod gtfs;
 pub mod health;
 pub mod identity;
 pub mod metrics;

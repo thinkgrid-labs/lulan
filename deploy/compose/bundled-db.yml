@@ -1,0 +1,51 @@
+# Overlay: bundled PostgreSQL + Redis for a self-contained single machine
+# (the "Small Operator" tier). Combine with the base file:
+#
+#   docker compose -f production.yml -f bundled-db.yml up -d
+#
+# Requires only POSTGRES_PASSWORD in .env — DATABASE_URL/REDIS_URL are
+# wired to the bundled containers here.
+
+services:
+  api:
+    environment:
+      DATABASE_URL: postgres://lulan:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/lulan
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lulan
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: lulan
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lulan"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Holds are soft state; losing Redis loses holds, never sold seats
+    # (ADR 0002) — appendonly keeps restarts smooth anyway.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:

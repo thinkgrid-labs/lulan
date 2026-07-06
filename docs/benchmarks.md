@@ -40,6 +40,30 @@ claim p50 ≈ 7.3–8.6M, p95 ≈ 12.3–13.4M; hold p50 ≈ 6.5M.
 
 Reproduce: `just up && just serve`, then `just loadgen 10000 0.5`.
 
+## Seat-lock latency — paced open-loop (2026-07-06)
+
+The PRD's <20 ms seat-lock target, measured honestly: open-loop arrivals
+(requests fire on a fixed clock and never wait for earlier responses), so
+these are true per-request service latencies — not queue depth. Release
+build, same shared-core laptop setup as above; latencies are full HTTP
+round trips against the 52-seat vessel, conflicts included (a denial
+exercises the same guarded UPDATE as a win).
+
+| Load shape | p50 | p95 | p99 | PRD <20 ms (p95) |
+|---|---|---|---|---|
+| 200/s × 30 s, claims only | 6.6 ms | 9.9 ms | 31 ms | **PASS** |
+| 200/s × 30 s, 50% via holds (claim) | 8.7 ms | 13.0 ms | 37 ms | **PASS** |
+| 200/s × 30 s, 50% via holds (hold) | 6.8 ms | 10.3 ms | 69 ms | — |
+| 500/s × 20 s, claims only | 21.0 ms | 38.6 ms | 61 ms | MISS |
+
+Zero double-sells and zero transport errors in every run. The 500/s miss
+is published as-is: it's 2.5× the PRD's reference rate on a laptop
+sharing cores with Postgres, Redis, Docker, and the harness itself —
+separated production hardware is expected to clear it, but we won't claim
+that until measured.
+
+Reproduce: `just serve-release`, then `just loadgen-paced 200 30`.
+
 ## Pricing — sandboxed WASM modules
 
 WASM pricing module (wasmtime host, per-call instantiation, fuel-metered,
