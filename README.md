@@ -7,9 +7,9 @@
 
 **Lulan is an open-source, API-first reservation platform for airlines, buses, ferries, rail, and any operator that sells capacity instead of products.** It runs in two modes behind one API: a **complete standalone booking engine** — inventory, pricing, payments, QR ticketing, offline validation, end to end — or an **orchestration layer** that owns the customer-facing reservation experience and synchronizes confirmed bookings into the operational systems you already run (airline PSS, ferry manifest backend, bus dispatch) through sync connectors.
 
-Built in Rust: segment-aware seat inventory, race-free reservations under high concurrency, event-sourced order lifecycle, a sandboxed WebAssembly pricing engine, and cryptographically signed QR tickets that validate **fully offline**. Lulan is deliberately **not a Passenger Service System** — like Stripe orchestrates payments without replacing banks, Lulan modernizes selling and reserving without touching flight ops, DCS, baggage, settlement, or crew. Keep Navitaire; upgrade the customer experience.
+Built in Rust: segment-aware seat inventory, race-free reservations under high concurrency, event-sourced order lifecycle, a sandboxed WebAssembly pricing engine, and cryptographically signed QR tickets that validate **fully offline**.
 
-Think "Medusa or commerce tools, but for seats, cabins, vehicle slots, and cargo holds" — inventory that exists in **space and time**, not on a shelf.
+Think of commerce tools, but for seats, cabins, vehicle slots, and cargo holds" — inventory that exists in **space and time**, not on a shelf.
 
 ---
 
