@@ -1,4 +1,4 @@
-# Lulan — Open-Source Headless Reservation Engine for Modern Transit & Capacity Booking
+# Lulan — Open-source Headless Reservation Orchestration Platform for Transit
 
 [![CI](https://github.com/thinkgrid-labs/lulan/actions/workflows/ci.yml/badge.svg)](https://github.com/thinkgrid-labs/lulan/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/core-AGPL--3.0-blue.svg)](LICENSE)
