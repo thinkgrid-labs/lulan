@@ -134,6 +134,62 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
 
     let app = lulan_api::router(AppState::new(Some(pool.clone()), None).await);
 
+    // One itinerary hold covers both legs of a round trip (when Redis is
+    // available). One call, one hold id — the Phase 6.5 booking primitive.
+    if let Ok(redis_url) = std::env::var("TEST_REDIS_URL") {
+        let redis = redis::Client::open(redis_url)
+            .unwrap()
+            .get_connection_manager()
+            .await
+            .unwrap();
+        let held_app = lulan_api::router(AppState::new(Some(pool.clone()), Some(redis)).await);
+        let (status, hold) = call(
+            &held_app,
+            "POST",
+            "/v1/holds",
+            Some(json!({
+                "journeys": [
+                    {"trip_id": out_trip,  "items": [{"unit_code": "7A", "origin": "BTG", "destination": "CEB"}]},
+                    {"trip_id": back_trip, "items": [{"unit_code": "7A", "origin": "CEB", "destination": "BTG"}]},
+                ],
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "one hold for the round trip: {hold}"
+        );
+        assert_eq!(
+            hold["items"].as_array().unwrap().len(),
+            2,
+            "hold covers both legs"
+        );
+        let hold_id = hold["hold_id"].as_str().unwrap();
+        // Re-holding either leg's seat now conflicts.
+        let (status, _) = call(
+            &held_app,
+            "POST",
+            "/v1/holds",
+            Some(json!({"trip_id": back_trip, "items": [{"unit_code": "7A", "origin": "CEB", "destination": "BTG"}]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "return leg seat is held");
+        // Releasing the itinerary frees both legs.
+        let released = held_app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/v1/holds/{hold_id}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(released.status(), StatusCode::NO_CONTENT);
+    }
+
     // ---- Round trip: quote → discount visible → order → per-leg tickets --
     let rt_quote_body = json!({
         "journeys": [

@@ -168,47 +168,6 @@
         }
       }
     },
-    "/v1/trips/{trip_id}/holds": {
-      "post": {
-        "summary": "Soft-hold a seat span (TTL-backed, Redis)",
-        "tags": [
-          "reservations"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/TripId"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/HoldRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Hold created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HoldResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "$ref": "#/components/responses/Conflict"
-          },
-          "503": {
-            "description": "Holds unavailable (Redis down); claims still work"
-          }
-        }
-      }
-    },
     "/v1/holds/{hold_id}": {
       "delete": {
         "summary": "Release a hold",
@@ -923,6 +882,43 @@
           }
         }
       }
+    },
+    "/v1/holds": {
+      "post": {
+        "summary": "Hold a one-way or round-trip seat selection (one itinerary hold)",
+        "description": "Soft-holds every selected seat across all legs as ONE hold, all-or-nothing. Same journeys[] shape as quotes/orders; a one-way holds one journey, a round trip two. Present the returned hold_id at order time, or DELETE /v1/holds/{id} to release. Holds cover seats only.",
+        "tags": [
+          "reservations"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HoldRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Itinerary hold created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HoldResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A seat is already held or sold; nothing was held"
+          },
+          "503": {
+            "description": "Holds unavailable (Redis down); claims still work"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1112,11 +1108,6 @@
           "passenger": {
             "type": "integer",
             "description": "Index into passengers[]. Required for seats unless there is exactly one passenger; forbidden for pools"
-          },
-          "hold_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Hold to consume (released on success)"
           }
         }
       },
@@ -1165,6 +1156,11 @@
             "items": {
               "$ref": "#/components/schemas/OrderJourney"
             }
+          },
+          "hold_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Itinerary hold from POST /v1/holds, released once the order's claims succeed"
           }
         },
         "description": "An itinerary: either journeys[] (round-trip / multi-city) or the single-trip shape trip_id + items (sugar for a one-journey itinerary). Trip type is derived: 1 journey = one-way; 2 journeys with reversed O&D = round-trip (round-trip fare rules apply); otherwise multi-city."
@@ -1501,20 +1497,47 @@
       },
       "HoldRequest": {
         "type": "object",
-        "required": [
-          "unit_code",
-          "origin",
-          "destination"
-        ],
+        "description": "Either journeys[] (round-trip / multi-seat across legs) or the single-trip shape trip_id + items.",
         "properties": {
-          "unit_code": {
-            "type": "string"
+          "trip_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Single-journey shape (with items)"
           },
-          "origin": {
-            "type": "string"
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HoldItem"
+            }
           },
-          "destination": {
-            "type": "string"
+          "journeys": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "required": [
+                "trip_id",
+                "items"
+              ],
+              "properties": {
+                "trip_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "items": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "$ref": "#/components/schemas/HoldItem"
+                  }
+                }
+              }
+            }
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "description": "Hold lifetime (default 600, max 1800)"
           }
         }
       },
@@ -1523,11 +1546,33 @@
         "properties": {
           "hold_id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "One id for the whole itinerary hold"
           },
           "expires_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "trip_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "unit_code": {
+                  "type": "string"
+                },
+                "origin": {
+                  "type": "string"
+                },
+                "destination": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       },
@@ -1974,6 +2019,25 @@
                 }
               }
             }
+          }
+        }
+      },
+      "HoldItem": {
+        "type": "object",
+        "required": [
+          "unit_code",
+          "origin",
+          "destination"
+        ],
+        "properties": {
+          "unit_code": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string"
+          },
+          "destination": {
+            "type": "string"
           }
         }
       }

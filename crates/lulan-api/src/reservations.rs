@@ -18,54 +18,127 @@ use crate::state::AppState;
 const DEFAULT_HOLD_TTL_SECS: u64 = 600;
 const MAX_HOLD_TTL_SECS: u64 = 1800;
 
+/// One seat to hold. Holds cover seats only; pools are claimed at order
+/// time.
 #[derive(Deserialize)]
-pub struct HoldRequest {
+pub struct HoldItem {
     unit_code: String,
     origin: String,
     destination: String,
+}
+
+#[derive(Deserialize)]
+pub struct HoldJourney {
+    trip_id: Uuid,
+    items: Vec<HoldItem>,
+}
+
+/// Itinerary shape (`journeys`) or the single-trip shape (`trip_id` +
+/// `items`) — the same shapes as quotes and orders. A one-way holds one
+/// journey; a round trip holds two. One call, one hold id.
+#[derive(Deserialize)]
+pub struct HoldRequest {
+    #[serde(default)]
+    trip_id: Option<Uuid>,
+    #[serde(default)]
+    items: Option<Vec<HoldItem>>,
+    #[serde(default)]
+    journeys: Option<Vec<HoldJourney>>,
+    #[serde(default)]
     ttl_seconds: Option<u64>,
 }
 
 #[derive(Serialize)]
-pub struct HoldResponse {
-    hold_id: Uuid,
+pub struct HeldItemInfo {
     trip_id: Uuid,
     unit_code: String,
-    expires_at: DateTime<Utc>,
+    origin: String,
+    destination: String,
 }
 
-/// POST /v1/trips/{trip_id}/holds
+#[derive(Serialize)]
+pub struct HoldResponse {
+    /// One id for the whole itinerary hold — present it at order time (or
+    /// to DELETE /v1/holds/{id}) to release every seat together.
+    hold_id: Uuid,
+    expires_at: DateTime<Utc>,
+    items: Vec<HeldItemInfo>,
+}
+
+/// POST /v1/holds — soft-hold every seat of a one-way or round-trip
+/// selection as one itinerary hold. All-or-nothing: if any seat is already
+/// held or sold, nothing is held (409).
 pub async fn create_hold(
     State(state): State<AppState>,
-    Path(trip_id): Path<Uuid>,
     Json(req): Json<HoldRequest>,
 ) -> Result<(StatusCode, Json<HoldResponse>), ApiError> {
+    let flat: Vec<(Uuid, HoldItem)> = match (req.trip_id, req.items, req.journeys) {
+        (None, None, Some(journeys)) => {
+            if journeys.is_empty() || journeys.iter().any(|j| j.items.is_empty()) {
+                return Err(ApiError::BadRequest(
+                    "every journey needs at least one item".into(),
+                ));
+            }
+            if journeys.len() > 8 {
+                return Err(ApiError::BadRequest("max 8 journeys per itinerary".into()));
+            }
+            journeys
+                .into_iter()
+                .flat_map(|j| {
+                    let trip_id = j.trip_id;
+                    j.items.into_iter().map(move |i| (trip_id, i))
+                })
+                .collect()
+        }
+        (Some(trip_id), Some(items), None) if !items.is_empty() => {
+            items.into_iter().map(|i| (trip_id, i)).collect()
+        }
+        _ => {
+            return Err(ApiError::BadRequest(
+                "provide either journeys[] or trip_id + items".into(),
+            ));
+        }
+    };
+
     let store = state.inventory()?;
     let holds = state.holds()?;
 
-    let target = store
-        .resolve_target(trip_id, &req.unit_code, &req.origin, &req.destination)
-        .await?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!(
-                "trip {trip_id} with unit {:?} not found",
-                req.unit_code
-            ))
-        })?;
-    if target.kind != "seat" {
-        return Err(ApiError::BadRequest(
-            "holds are only supported for seats; claim pools directly".into(),
-        ));
-    }
-
-    // Already-sold segments can never be held — check the source of truth
-    // first so customers aren't strung along on a dead span.
-    let occupied = store
-        .seat_mask(trip_id, target.unit_id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound("no occupancy row for this trip/unit".into()))?;
-    if !target.span.is_available(occupied) {
-        return Err(ApiError::Conflict("span already sold for this seat".into()));
+    // Resolve every seat and reject dead spans against the source of truth
+    // before touching Redis.
+    let mut seats = Vec::with_capacity(flat.len());
+    let mut infos = Vec::with_capacity(flat.len());
+    for (trip_id, item) in &flat {
+        let target = store
+            .resolve_target(*trip_id, &item.unit_code, &item.origin, &item.destination)
+            .await?
+            .ok_or_else(|| {
+                ApiError::NotFound(format!(
+                    "trip {trip_id} with unit {:?} not found",
+                    item.unit_code
+                ))
+            })?;
+        if target.kind != "seat" {
+            return Err(ApiError::BadRequest(
+                "holds are only supported for seats; pools are claimed at order time".into(),
+            ));
+        }
+        let occupied = store
+            .seat_mask(*trip_id, target.unit_id)
+            .await?
+            .ok_or_else(|| ApiError::NotFound("no occupancy row for this trip/unit".into()))?;
+        if !target.span.is_available(occupied) {
+            return Err(ApiError::Conflict(format!(
+                "span already sold for seat {} on trip {trip_id}",
+                item.unit_code
+            )));
+        }
+        seats.push((*trip_id, target.unit_id, target.span));
+        infos.push(HeldItemInfo {
+            trip_id: *trip_id,
+            unit_code: item.unit_code.clone(),
+            origin: item.origin.clone(),
+            destination: item.destination.clone(),
+        });
     }
 
     let ttl = std::time::Duration::from_secs(
@@ -74,30 +147,33 @@ pub async fn create_hold(
             .min(MAX_HOLD_TTL_SECS),
     );
     let hold = holds
-        .acquire(trip_id, target.unit_id, target.span, ttl)
+        .acquire_itinerary(&seats, ttl)
         .await
         .map_err(|e| ApiError::Internal(e.into()))?
-        .ok_or_else(|| ApiError::Conflict("span currently held by another session".into()))?;
+        .ok_or_else(|| {
+            ApiError::Conflict(
+                "a seat in this itinerary is currently held by another session".into(),
+            )
+        })?;
 
     Ok((
         StatusCode::CREATED,
         Json(HoldResponse {
             hold_id: hold.hold_id,
-            trip_id,
-            unit_code: req.unit_code,
             expires_at: hold.expires_at,
+            items: infos,
         }),
     ))
 }
 
-/// DELETE /v1/holds/{hold_id}
+/// DELETE /v1/holds/{hold_id} — release the whole itinerary hold.
 pub async fn release_hold(
     State(state): State<AppState>,
     Path(hold_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let holds = state.holds()?;
     let released = holds
-        .release(hold_id)
+        .release_itinerary(hold_id)
         .await
         .map_err(|e| ApiError::Internal(e.into()))?;
     if released {
@@ -146,17 +222,25 @@ pub async fn create_claim(
             ))
         })?;
 
-    // A presented hold must be live and must match this trip + unit — but
-    // Redis being down never blocks a claim (ADR 0002): if verification
-    // itself fails, we proceed and let the guarded UPDATE decide.
+    // A presented itinerary hold must be live and must cover this trip +
+    // unit — but Redis being down never blocks a claim (ADR 0002): if
+    // verification itself fails, we proceed and let the guarded UPDATE
+    // decide.
     if let (Some(hold_id), Ok(holds)) = (req.hold_id, state.holds()) {
-        match holds.verify(hold_id, trip_id, target.unit_id).await {
-            Ok(false) => {
-                return Err(ApiError::Conflict(
-                    "hold expired or does not match this trip/unit".into(),
-                ));
+        match holds.itinerary_members(hold_id).await {
+            Ok(Some(members)) => {
+                let covers = members
+                    .iter()
+                    .any(|m| m.trip_id == trip_id && m.unit_id == target.unit_id);
+                if !covers {
+                    return Err(ApiError::Conflict(
+                        "hold does not cover this trip/unit".into(),
+                    ));
+                }
             }
-            Ok(true) => {}
+            Ok(None) => {
+                return Err(ApiError::Conflict("hold expired or unknown".into()));
+            }
             Err(err) => {
                 tracing::warn!(error = %err, %hold_id, "hold verification unavailable — proceeding to claim");
             }
@@ -187,9 +271,12 @@ pub async fn create_claim(
 
     match outcome {
         ClaimOutcome::Claimed => {
-            // The span is now sold; the hold has served its purpose.
+            // The span is now sold; the itinerary hold has served its
+            // purpose. (This low-level single-seat claim releases the whole
+            // hold — fine for its single-seat use; orders are the
+            // multi-seat path.)
             if let (Some(hold_id), Ok(holds)) = (req.hold_id, state.holds()) {
-                let _ = holds.release(hold_id).await;
+                let _ = holds.release_itinerary(hold_id).await;
             }
             Ok((
                 StatusCode::CREATED,

@@ -165,8 +165,6 @@ export interface OrderItemRequest {
   quantity?: number;
   /** Index into passengers[]; required for seats unless there is exactly one passenger. */
   passenger?: number;
-  /** Consumes a soft hold on success. */
-  hold_id?: string;
 }
 
 /**
@@ -183,6 +181,8 @@ export interface CreateOrderRequest {
   guest_contact?: string;
   quote_token?: string;
   promo_code?: string;
+  /** Itinerary hold from createHold, released once the order's claims succeed. */
+  hold_id?: string;
 }
 
 export interface OrderItem {
@@ -277,9 +277,17 @@ export interface CustomerOrderSummary {
   created_at: string;
 }
 
+export interface HoldItem {
+  unit_code: string;
+  origin: string;
+  destination: string;
+}
+
 export interface HoldResponse {
+  /** One id for the whole itinerary hold — pass to createOrder or releaseHold. */
   hold_id: string;
   expires_at: string;
+  items: Array<{ trip_id: string; unit_code: string; origin: string; destination: string }>;
 }
 
 // ---------------------------------------------------------------- errors
@@ -385,12 +393,18 @@ export class LulanClient {
 
   // ---- holds ----------------------------------------------------------
 
+  /**
+   * Hold a one-way or round-trip seat selection as ONE itinerary hold
+   * (all-or-nothing). Same journeys[] shape as quotes/orders; a round trip
+   * passes both legs in one call. Pass the returned hold_id to createOrder.
+   */
   createHold(
-    tripId: string,
-    item: { unit_code: string; origin: string; destination: string },
+    request:
+      | { trip_id: string; items: HoldItem[]; ttl_seconds?: number }
+      | { journeys: Journey<HoldItem>[]; ttl_seconds?: number },
     options?: RequestOptions,
   ): Promise<HoldResponse> {
-    return this.request("POST", `/v1/trips/${tripId}/holds`, item, options);
+    return this.request("POST", "/v1/holds", request, options);
   }
 
   releaseHold(holdId: string, options?: RequestOptions): Promise<void> {

@@ -44,6 +44,10 @@ pub struct CreateOrderRequest {
     /// Live-pricing only; quoted orders already have promos baked in.
     #[serde(default)]
     promo_code: Option<String>,
+    /// Itinerary hold from POST /v1/holds. Released once the order's own
+    /// claims succeed; a claim is authoritative with or without it.
+    #[serde(default)]
+    hold_id: Option<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -83,8 +87,6 @@ pub struct OrderItemRequest {
     /// exactly one passenger; must be absent for pool items.
     #[serde(default)]
     passenger: Option<usize>,
-    #[serde(default)]
-    hold_id: Option<Uuid>,
 }
 
 /// POST /v1/orders — prices, then claims all items and creates the order
@@ -307,11 +309,9 @@ pub async fn create(
                 .await
                 .map_err(|e| ApiError::Internal(e.into()))?;
 
-            // Consumed holds have served their purpose; best-effort cleanup.
-            if let Ok(holds) = state.holds() {
-                for hold_id in flat.iter().filter_map(|(_, i)| i.hold_id) {
-                    let _ = holds.release(hold_id).await;
-                }
+            // The itinerary hold has served its purpose; best-effort release.
+            if let (Some(hold_id), Ok(holds)) = (req.hold_id, state.holds()) {
+                let _ = holds.release_itinerary(hold_id).await;
             }
 
             let response = CreateOrderResponse {

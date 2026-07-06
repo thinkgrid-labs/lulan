@@ -108,7 +108,7 @@ just loadgen 10000 0.5     # 10k contenders, 50% via holds — expect 0 double-s
 |---|---|
 | `GET /v1/trips/search` | One-way / round-trip search: candidate trips per leg with schedule + availability |
 | `GET /v1/trips/{id}/availability` | Per-seat / per-pool availability for a journey span |
-| `POST /v1/trips/{id}/holds` | Soft-hold a seat span (TTL, Redis) |
+| `POST /v1/holds` | Soft-hold a one-way or round-trip seat selection as one itinerary hold |
 | `POST /v1/quotes` | Itemised fare quote + signed quote token |
 | `POST /v1/orders` | Atomic multi-passenger booking (live-priced or quote-token) |
 | `POST /v1/orders/{id}/payment` | Create payment intent (provider port) |

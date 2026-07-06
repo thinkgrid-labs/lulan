@@ -40,7 +40,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health/ready", get(health::ready))
         .route("/v1/trips/search", get(trips::search))
         .route("/v1/trips/{trip_id}/availability", get(trips::availability))
-        .route("/v1/trips/{trip_id}/holds", post(reservations::create_hold))
+        .route("/v1/holds", post(reservations::create_hold))
         .route(
             "/v1/trips/{trip_id}/claims",
             post(reservations::create_claim),

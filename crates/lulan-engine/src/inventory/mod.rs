@@ -4,7 +4,7 @@
 mod holds;
 mod store;
 
-pub use holds::{Hold, HoldError, HoldStore};
+pub use holds::{HeldSeat, Hold, HoldError, HoldStore, ItineraryHold};
 pub use store::{
     ClaimOutcome, ClaimTarget, FareAvailability, InventoryStore, PoolAvailability,
     SeatAvailability, StoreError, TripAvailability, TripSummary, claim_pool_exec, claim_seat_exec,

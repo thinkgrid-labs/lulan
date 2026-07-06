@@ -60,6 +60,22 @@ pub struct Hold {
     pub expires_at: DateTime<Utc>,
 }
 
+/// One seat held under an itinerary hold.
+#[derive(Debug, Clone, Copy)]
+pub struct HeldSeat {
+    pub trip_id: Uuid,
+    pub unit_id: Uuid,
+}
+
+/// A soft reservation of several seats across one or more trips, addressed
+/// by a single id — the itinerary-level hold (round-trip / multi-city).
+#[derive(Debug, Clone)]
+pub struct ItineraryHold {
+    pub hold_id: Uuid,
+    pub expires_at: DateTime<Utc>,
+    pub members: Vec<HeldSeat>,
+}
+
 #[derive(Clone)]
 pub struct HoldStore {
     conn: ConnectionManager,
@@ -80,6 +96,12 @@ impl HoldStore {
 
     fn registry_key(hold_id: Uuid) -> String {
         format!("lulan:hold:{hold_id}")
+    }
+
+    /// Registry for an itinerary hold: `seat_hold_id:trip:unit` triples
+    /// joined by `;`, so the group can be verified/released by one id.
+    fn itinerary_key(hold_id: Uuid) -> String {
+        format!("lulan:itinerary:{hold_id}")
     }
 
     /// Try to hold `span` on one seat for `ttl`. `Ok(None)` = span is held
@@ -154,6 +176,111 @@ impl HoldStore {
                 .await?;
         }
         let _: () = conn.del(&registry).await?;
+        Ok(true)
+    }
+
+    /// Hold several seats — across one or more trips — as ONE itinerary
+    /// hold. All-or-nothing: if any span is already held, the ones taken so
+    /// far are rolled back and `Ok(None)` is returned. This is what a
+    /// round-trip (2 legs) or multi-city selection uses; a single seat is
+    /// just a one-member itinerary.
+    pub async fn acquire_itinerary(
+        &self,
+        seats: &[(Uuid, Uuid, SegmentSpan)],
+        ttl: std::time::Duration,
+    ) -> Result<Option<ItineraryHold>, HoldError> {
+        let group_id = Uuid::new_v4();
+        let ttl_ms = ttl.as_millis() as i64;
+        // (seat_hold_id, trip, unit)
+        let mut acquired: Vec<(Uuid, Uuid, Uuid)> = Vec::with_capacity(seats.len());
+        for (trip, unit, span) in seats {
+            match self.acquire(*trip, *unit, *span, ttl).await? {
+                Some(hold) => acquired.push((hold.hold_id, *trip, *unit)),
+                None => {
+                    for (seat_hold_id, _, _) in &acquired {
+                        let _ = self.release(*seat_hold_id).await;
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+
+        let value = acquired
+            .iter()
+            .map(|(hid, t, u)| format!("{hid}:{t}:{u}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        let mut conn = self.conn.clone();
+        let _: () = redis::cmd("SET")
+            .arg(Self::itinerary_key(group_id))
+            .arg(value)
+            .arg("PX")
+            .arg(ttl_ms)
+            .query_async(&mut conn)
+            .await?;
+
+        Ok(Some(ItineraryHold {
+            hold_id: group_id,
+            expires_at: Utc::now() + chrono::Duration::milliseconds(ttl_ms),
+            members: acquired
+                .iter()
+                .map(|(_, trip_id, unit_id)| HeldSeat {
+                    trip_id: *trip_id,
+                    unit_id: *unit_id,
+                })
+                .collect(),
+        }))
+    }
+
+    async fn itinerary_raw(
+        &self,
+        hold_id: Uuid,
+    ) -> Result<Option<Vec<(Uuid, Uuid, Uuid)>>, HoldError> {
+        let mut conn = self.conn.clone();
+        let value: Option<String> = conn.get(Self::itinerary_key(hold_id)).await?;
+        let Some(value) = value else {
+            return Ok(None);
+        };
+        let mut members = Vec::new();
+        for member in value.split(';') {
+            let mut parts = member.split(':');
+            if let (Some(h), Some(t), Some(u), None) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+                && let (Ok(h), Ok(t), Ok(u)) =
+                    (Uuid::parse_str(h), Uuid::parse_str(t), Uuid::parse_str(u))
+            {
+                members.push((h, t, u));
+            }
+        }
+        Ok(Some(members))
+    }
+
+    /// The seats an itinerary hold covers, or `None` if it has expired /
+    /// never existed. Used to verify a presented hold covers an order's
+    /// items.
+    pub async fn itinerary_members(
+        &self,
+        hold_id: Uuid,
+    ) -> Result<Option<Vec<HeldSeat>>, HoldError> {
+        Ok(self.itinerary_raw(hold_id).await?.map(|members| {
+            members
+                .into_iter()
+                .map(|(_, trip_id, unit_id)| HeldSeat { trip_id, unit_id })
+                .collect()
+        }))
+    }
+
+    /// Release every seat of an itinerary hold. Returns false if it had
+    /// already expired.
+    pub async fn release_itinerary(&self, hold_id: Uuid) -> Result<bool, HoldError> {
+        let Some(members) = self.itinerary_raw(hold_id).await? else {
+            return Ok(false);
+        };
+        for (seat_hold_id, _, _) in &members {
+            let _ = self.release(*seat_hold_id).await?;
+        }
+        let mut conn = self.conn.clone();
+        let _: () = conn.del(Self::itinerary_key(hold_id)).await?;
         Ok(true)
     }
 }

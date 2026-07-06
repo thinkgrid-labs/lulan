@@ -211,13 +211,13 @@ async fn hold_flow_protects_spans_and_feeds_claims() {
     let _: () = redis::cmd("FLUSHDB").query_async(&mut redis).await.unwrap();
 
     let app = lulan_api::router(AppState::new(Some(pool.clone()), Some(redis)).await);
-    let holds_uri = format!("/v1/trips/{trip_id}/holds");
+    let holds_uri = "/v1/holds".to_string();
 
     // Hold BTG→ILO on 3C.
     let (status, hold) = post_json(
         &app,
         &holds_uri,
-        json!({"unit_code": "3C", "origin": "BTG", "destination": "ILO"}),
+        json!({"trip_id": trip_id, "items": [{"unit_code": "3C", "origin": "BTG", "destination": "ILO"}]}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
@@ -227,14 +227,14 @@ async fn hold_flow_protects_spans_and_feeds_claims() {
     let (status, _) = post_json(
         &app,
         &holds_uri,
-        json!({"unit_code": "3C", "origin": "CTC", "destination": "CEB"}),
+        json!({"trip_id": trip_id, "items": [{"unit_code": "3C", "origin": "CTC", "destination": "CEB"}]}),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "overlapping hold");
     let (status, tail_hold) = post_json(
         &app,
         &holds_uri,
-        json!({"unit_code": "3C", "origin": "ILO", "destination": "CEB"}),
+        json!({"trip_id": trip_id, "items": [{"unit_code": "3C", "origin": "ILO", "destination": "CEB"}]}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "disjoint span is holdable");
@@ -275,7 +275,7 @@ async fn hold_flow_protects_spans_and_feeds_claims() {
     let (status, _) = post_json(
         &app,
         &holds_uri,
-        json!({"unit_code": "3C", "origin": "ILO", "destination": "CEB"}),
+        json!({"trip_id": trip_id, "items": [{"unit_code": "3C", "origin": "ILO", "destination": "CEB"}]}),
     )
     .await;
     assert_eq!(
@@ -288,7 +288,7 @@ async fn hold_flow_protects_spans_and_feeds_claims() {
     let (status, _) = post_json(
         &app,
         &holds_uri,
-        json!({"unit_code": "3C", "origin": "BTG", "destination": "CTC"}),
+        json!({"trip_id": trip_id, "items": [{"unit_code": "3C", "origin": "BTG", "destination": "CTC"}]}),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "sold span cannot be held");
