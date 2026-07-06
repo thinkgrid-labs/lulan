@@ -283,4 +283,59 @@ impl HoldStore {
         let _: () = conn.del(Self::itinerary_key(hold_id)).await?;
         Ok(true)
     }
+
+    /// Units on `trip_id` with a live hold overlapping `span` — what lets
+    /// the seat map grey out seats other sessions are holding. Read-only
+    /// and advisory: expiry is judged client-side against the stored
+    /// timestamps, no keys are mutated.
+    pub async fn held_units(
+        &self,
+        trip_id: Uuid,
+        span: SegmentSpan,
+    ) -> Result<std::collections::HashSet<Uuid>, HoldError> {
+        let mut conn = self.conn.clone();
+        let pattern = format!("lulan:holds:{trip_id}:*");
+        let mut held = std::collections::HashSet::new();
+        let now = Utc::now().timestamp_millis();
+        let span_mask = span.mask();
+
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(200)
+                .query_async(&mut conn)
+                .await?;
+            for key in keys {
+                let Some(unit_id) = key.rsplit(':').next().and_then(|u| Uuid::parse_str(u).ok())
+                else {
+                    continue;
+                };
+                let fields: std::collections::HashMap<String, String> = conn.hgetall(&key).await?;
+                let mut union: u64 = 0;
+                for value in fields.values() {
+                    let mut parts = value.split(':');
+                    if let (Some(exp), Some(hi), Some(lo)) =
+                        (parts.next(), parts.next(), parts.next())
+                        && let (Ok(exp), Ok(hi), Ok(lo)) =
+                            (exp.parse::<i64>(), hi.parse::<u64>(), lo.parse::<u64>())
+                        && exp > now
+                    {
+                        union |= (hi << 32) | lo;
+                    }
+                }
+                if union & span_mask != 0 {
+                    held.insert(unit_id);
+                }
+            }
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
+        Ok(held)
+    }
 }

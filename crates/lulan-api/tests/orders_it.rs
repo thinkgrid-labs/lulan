@@ -49,6 +49,7 @@ async fn setup(offset: i64) -> Option<(PgPool, Uuid, axum::Router)> {
         "DELETE FROM scan_events WHERE ticket_id IN (SELECT id FROM tickets WHERE order_id = ANY($1))",
         "DELETE FROM tickets WHERE order_id = ANY($1)",
         "DELETE FROM idempotency_keys WHERE order_id = ANY($1)",
+        "DELETE FROM order_ancillaries WHERE order_id = ANY($1)",
         "DELETE FROM order_items WHERE order_id = ANY($1)",
         "DELETE FROM passengers WHERE order_id = ANY($1)",
         "DELETE FROM orders WHERE id = ANY($1)",

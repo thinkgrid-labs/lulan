@@ -1,6 +1,7 @@
 //! Lulan API: HTTP layer over the engine. Library crate so integration
 //! tests (and later the loadgen harness) can drive the router directly.
 
+pub mod ancillaries;
 pub mod auth;
 pub mod config;
 pub mod error;
@@ -70,6 +71,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/webhooks/{id}",
             axum::routing::delete(webhooks_admin::remove),
+        )
+        .route(
+            "/v1/ancillaries",
+            get(ancillaries::list).post(ancillaries::create),
+        )
+        .route(
+            "/v1/ancillaries/{id}",
+            axum::routing::delete(ancillaries::remove),
         )
         .route("/v1/api-keys", post(auth::create_key))
         .route("/v1/api-keys/{id}", axum::routing::delete(auth::revoke_key))

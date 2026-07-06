@@ -57,6 +57,31 @@ pub struct NewOrderItem {
     pub passenger_index: Option<usize>,
 }
 
+/// A purchased add-on, snapshotted from the catalog at purchase time.
+#[derive(Debug, Clone)]
+pub struct NewOrderAncillary {
+    pub ancillary_id: Uuid,
+    pub code: String,
+    pub name: String,
+    /// Journey-scoped lines carry the leg they apply to.
+    pub trip_id: Option<Uuid>,
+    /// Per-passenger lines carry the passenger index.
+    pub passenger_index: Option<usize>,
+    pub quantity: i32,
+    /// Priced by the caller from the catalog (flat price × quantity).
+    pub total_minor: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderAncillary {
+    pub code: String,
+    pub name: String,
+    pub trip_id: Option<Uuid>,
+    pub passenger_id: Option<Uuid>,
+    pub quantity: i32,
+    pub total_minor: i64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct OrderItem {
     pub trip_id: Uuid,
@@ -83,6 +108,7 @@ pub struct OrderRecord {
     pub expires_at: Option<DateTime<Utc>>,
     pub passengers: Vec<PassengerRecord>,
     pub items: Vec<OrderItem>,
+    pub ancillaries: Vec<OrderAncillary>,
 }
 
 /// Rejections that are the caller's fault, surfaced before anything is
@@ -142,6 +168,7 @@ impl OrderStore {
         &self,
         passengers: &[NewPassenger],
         items: &[NewOrderItem],
+        ancillaries: &[NewOrderAncillary],
     ) -> Result<CreateOutcome, StoreError> {
         if passengers.is_empty() {
             return Ok(CreateOutcome::Invalid(ItemValidation::NoPassengers));
@@ -208,9 +235,23 @@ impl OrderStore {
             passenger_slots.push(slot);
         }
 
+        for line in ancillaries {
+            if let Some(index) = line.passenger_index
+                && index >= passengers.len()
+            {
+                return Ok(CreateOutcome::Invalid(
+                    ItemValidation::PassengerIndexOutOfRange {
+                        unit_code: line.code.clone(),
+                        index,
+                    },
+                ));
+            }
+        }
+
         let order_id = Uuid::new_v4();
         let expires_at = Utc::now() + chrono::Duration::minutes(ORDER_TTL_MINUTES);
-        let total_minor: i64 = items.iter().map(|i| i.price_minor).sum();
+        let total_minor: i64 = items.iter().map(|i| i.price_minor).sum::<i64>()
+            + ancillaries.iter().map(|a| a.total_minor).sum::<i64>();
 
         let mut tx = self.pool.begin().await?;
 
@@ -305,6 +346,47 @@ impl OrderStore {
             });
         }
 
+        let mut recorded_ancillaries = Vec::with_capacity(ancillaries.len());
+        for line in ancillaries {
+            let passenger_id = line
+                .passenger_index
+                .map(|index| passenger_records[index].id);
+            sqlx::query(
+                "INSERT INTO order_ancillaries (id, order_id, ancillary_id, code, name, trip_id, passenger_id, quantity, total_minor)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(order_id)
+            .bind(line.ancillary_id)
+            .bind(&line.code)
+            .bind(&line.name)
+            .bind(line.trip_id)
+            .bind(passenger_id)
+            .bind(line.quantity)
+            .bind(line.total_minor)
+            .execute(&mut *tx)
+            .await?;
+            recorded_ancillaries.push(OrderAncillary {
+                code: line.code.clone(),
+                name: line.name.clone(),
+                trip_id: line.trip_id,
+                passenger_id,
+                quantity: line.quantity,
+                total_minor: line.total_minor,
+            });
+        }
+
+        let ancillaries_json: Vec<_> = recorded_ancillaries
+            .iter()
+            .map(|a| {
+                json!({
+                    "code": a.code, "name": a.name, "trip_id": a.trip_id,
+                    "passenger_id": a.passenger_id, "quantity": a.quantity,
+                    "total_minor": a.total_minor,
+                })
+            })
+            .collect();
+
         let items_json: Vec<_> = recorded_items
             .iter()
             .map(|i| {
@@ -337,6 +419,7 @@ impl OrderStore {
                 "total_minor": total_minor,
                 "currency": CURRENCY,
                 "items": items_json,
+                "ancillaries": ancillaries_json,
             }),
         )
         .await?;
@@ -361,6 +444,7 @@ impl OrderStore {
             expires_at: Some(expires_at),
             passengers: passenger_records,
             items: recorded_items,
+            ancillaries: recorded_ancillaries,
         }))
     }
 
@@ -577,6 +661,27 @@ impl OrderStore {
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()?;
 
+        let ancillary_rows = sqlx::query(
+            "SELECT code, name, trip_id, passenger_id, quantity, total_minor
+             FROM order_ancillaries WHERE order_id = $1 ORDER BY code",
+        )
+        .bind(order_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let ancillaries = ancillary_rows
+            .into_iter()
+            .map(|r| {
+                Ok(OrderAncillary {
+                    code: r.try_get("code")?,
+                    name: r.try_get("name")?,
+                    trip_id: r.try_get("trip_id")?,
+                    passenger_id: r.try_get("passenger_id")?,
+                    quantity: r.try_get("quantity")?,
+                    total_minor: r.try_get("total_minor")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
         Ok(Some(OrderRecord {
             order_id,
             trip_ids: distinct_trips(&items),
@@ -589,6 +694,7 @@ impl OrderStore {
             expires_at: row.try_get("expires_at")?,
             passengers,
             items,
+            ancillaries,
         }))
     }
 

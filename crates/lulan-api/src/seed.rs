@@ -80,8 +80,65 @@ async fn seed_fare_rules(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Demo add-on catalog. Idempotent (upsert by code).
+async fn seed_ancillaries(pool: &PgPool) -> anyhow::Result<()> {
+    // (code, name, kind, price_minor, per, scope)
+    let catalog: [(&str, &str, &str, i64, &str, &str); 4] = [
+        (
+            "BAG20",
+            "Checked bag 20 kg",
+            "baggage",
+            25_000,
+            "passenger",
+            "journey",
+        ),
+        (
+            "MEAL_STD",
+            "Onboard meal",
+            "meal",
+            12_000,
+            "passenger",
+            "journey",
+        ),
+        (
+            "INSURE",
+            "Travel insurance",
+            "insurance",
+            15_000,
+            "passenger",
+            "itinerary",
+        ),
+        (
+            "PRIORITY",
+            "Priority boarding",
+            "service",
+            8_000,
+            "passenger",
+            "journey",
+        ),
+    ];
+    for (code, name, kind, price, per, scope) in catalog {
+        sqlx::query(
+            "INSERT INTO ancillaries (id, code, name, kind, price_minor, per, scope)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (code) DO NOTHING",
+        )
+        .bind(Uuid::new_v4())
+        .bind(code)
+        .bind(name)
+        .bind(kind)
+        .bind(price)
+        .bind(per)
+        .bind(scope)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 pub async fn seed(pool: &PgPool) -> anyhow::Result<()> {
     seed_fare_rules(pool).await?;
+    seed_ancillaries(pool).await?;
     let already =
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM routes WHERE code = 'BTG-CEB'")
             .fetch_one(pool)

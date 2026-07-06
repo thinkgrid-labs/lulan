@@ -3,9 +3,9 @@
 //! conflict on the LAST leg rolls back claims on every leg), and per-leg
 //! QR tickets validating offline against their own trips.
 //!
-//! Fixture trips: the outbound route's EARLIEST departure (shared with
-//! availability_it, which resets all its masks itself — we touch only
-//! seats 6A/7A) and the return route's trips (used by no other suite).
+//! Fixture trips: FUTURE departures only (ticket validity is departure
+//! +24h, so past trips would age the suite out), on row-10 seats no other
+//! suite touches (claims_it uses 10A; we use 10B/10C/10D).
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -51,7 +51,7 @@ async fn call(
 async fn route_trips(pool: &PgPool, route: &str) -> Vec<Uuid> {
     sqlx::query(
         "SELECT t.id FROM trips t JOIN routes r ON r.id = t.route_id
-         WHERE r.code = $1 ORDER BY t.departs_at",
+         WHERE r.code = $1 AND t.departs_at > now() ORDER BY t.departs_at",
     )
     .bind(route)
     .fetch_all(pool)
@@ -92,12 +92,12 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
     let outbound = route_trips(&pool, "BTG-CEB").await;
     let returns = route_trips(&pool, "CEB-BTG").await;
     assert!(returns.len() >= 5, "seed must create the return route");
-    let out_trip = outbound[0]; // earliest outbound (availability's trip)
+    let out_trip = outbound[0]; // earliest FUTURE outbound
     let back_trip = returns[1];
     let legs3 = [returns[2], returns[3], returns[4]];
 
     // Idempotent fixture: drop this suite's stale orders (any order
-    // touching our trips on seats 6A/7A), then free those seats.
+    // touching our trips on seats 10B/10C/10D), then free those seats.
     let involved: Vec<Uuid> = [out_trip, back_trip]
         .iter()
         .chain(legs3.iter())
@@ -106,7 +106,7 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
     let stale: Vec<Uuid> = sqlx::query_scalar(
         "SELECT DISTINCT oi.order_id FROM order_items oi
          JOIN capacity_units cu ON cu.id = oi.unit_id
-         WHERE oi.trip_id = ANY($1) AND cu.code IN ('6A', '7A')",
+         WHERE oi.trip_id = ANY($1) AND cu.code IN ('10B', '10C', '10D')",
     )
     .bind(&involved)
     .fetch_all(&pool)
@@ -116,6 +116,7 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
         "DELETE FROM scan_events WHERE ticket_id IN (SELECT id FROM tickets WHERE order_id = ANY($1))",
         "DELETE FROM tickets WHERE order_id = ANY($1)",
         "DELETE FROM idempotency_keys WHERE order_id = ANY($1)",
+        "DELETE FROM order_ancillaries WHERE order_id = ANY($1)",
         "DELETE FROM order_items WHERE order_id = ANY($1)",
         "DELETE FROM passengers WHERE order_id = ANY($1)",
         "DELETE FROM orders WHERE id = ANY($1)",
@@ -125,7 +126,7 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
     sqlx::query(
         "UPDATE seat_occupancy so SET occupied_mask = 0
          FROM capacity_units cu
-         WHERE cu.id = so.unit_id AND so.trip_id = ANY($1) AND cu.code IN ('6A', '7A')",
+         WHERE cu.id = so.unit_id AND so.trip_id = ANY($1) AND cu.code IN ('10B', '10C', '10D')",
     )
     .bind(&involved)
     .execute(&pool)
@@ -149,8 +150,8 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
             "/v1/holds",
             Some(json!({
                 "journeys": [
-                    {"trip_id": out_trip,  "items": [{"unit_code": "7A", "origin": "BTG", "destination": "CEB"}]},
-                    {"trip_id": back_trip, "items": [{"unit_code": "7A", "origin": "CEB", "destination": "BTG"}]},
+                    {"trip_id": out_trip,  "items": [{"unit_code": "10D", "origin": "BTG", "destination": "CEB"}]},
+                    {"trip_id": back_trip, "items": [{"unit_code": "10D", "origin": "CEB", "destination": "BTG"}]},
                 ],
             })),
         )
@@ -171,10 +172,32 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
             &held_app,
             "POST",
             "/v1/holds",
-            Some(json!({"trip_id": back_trip, "items": [{"unit_code": "7A", "origin": "CEB", "destination": "BTG"}]})),
+            Some(json!({"trip_id": back_trip, "items": [{"unit_code": "10D", "origin": "CEB", "destination": "BTG"}]})),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "return leg seat is held");
+        // Booking with an expired (or unknown) hold is a deterministic 409
+        // — the "session expired, re-select" moment.
+        let (status, body) = call(
+            &held_app,
+            "POST",
+            "/v1/orders",
+            Some(json!({
+                "passengers": [{"full_name": "Late Buyer", "type": "adult"}],
+                "guest_contact": "late@example.com",
+                "hold_id": Uuid::new_v4(),
+                "journeys": [
+                    {"trip_id": out_trip, "items": [{"unit_code": "10B", "origin": "BTG", "destination": "CEB"}]},
+                ],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("hold expired"),
+            "{body}"
+        );
+
         // Releasing the itinerary frees both legs.
         let released = held_app
             .clone()
@@ -193,8 +216,8 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
     // ---- Round trip: quote → discount visible → order → per-leg tickets --
     let rt_quote_body = json!({
         "journeys": [
-            {"trip_id": out_trip,  "items": [{"unit_code": "6A", "origin": "BTG", "destination": "CEB", "passenger_type": "adult"}]},
-            {"trip_id": back_trip, "items": [{"unit_code": "6A", "origin": "CEB", "destination": "BTG", "passenger_type": "adult"}]},
+            {"trip_id": out_trip,  "items": [{"unit_code": "10C", "origin": "BTG", "destination": "CEB", "passenger_type": "adult"}]},
+            {"trip_id": back_trip, "items": [{"unit_code": "10C", "origin": "CEB", "destination": "BTG", "passenger_type": "adult"}]},
         ],
     });
     let (status, rt_quote) = call(&app, "POST", "/v1/quotes", Some(rt_quote_body)).await;
@@ -221,7 +244,7 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
             "/v1/quotes",
             Some(json!({
                 "trip_id": trip,
-                "items": [{"unit_code": "6A", "origin": origin, "destination": destination, "passenger_type": "adult"}],
+                "items": [{"unit_code": "10C", "origin": origin, "destination": destination, "passenger_type": "adult"}],
             })),
         )
         .await;
@@ -244,8 +267,8 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
             "guest_contact": "bea@example.com",
             "quote_token": rt_quote["quote_token"],
             "journeys": [
-                {"trip_id": out_trip,  "items": [{"unit_code": "6A", "origin": "BTG", "destination": "CEB"}]},
-                {"trip_id": back_trip, "items": [{"unit_code": "6A", "origin": "CEB", "destination": "BTG"}]},
+                {"trip_id": out_trip,  "items": [{"unit_code": "10C", "origin": "BTG", "destination": "CEB"}]},
+                {"trip_id": back_trip, "items": [{"unit_code": "10C", "origin": "CEB", "destination": "BTG"}]},
             ],
         })),
     )
@@ -321,7 +344,7 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
     ]
     .iter()
     .map(|(trip, origin, destination)| {
-        json!({"trip_id": trip, "items": [{"unit_code": "6A", "origin": origin, "destination": destination}]})
+        json!({"trip_id": trip, "items": [{"unit_code": "10C", "origin": origin, "destination": destination}]})
     })
     .collect();
     let (status, mc_order) = call(
@@ -344,11 +367,11 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
     assert!(no_rt);
 
     // ---- Cross-leg atomicity: conflict on the LAST leg -------------------
-    // Pre-occupy 7A on leg 3 for the full journey.
+    // Pre-occupy 10D on leg 3 for the full journey.
     sqlx::query(
         "UPDATE seat_occupancy so SET occupied_mask = 7
          FROM capacity_units cu
-         WHERE cu.id = so.unit_id AND so.trip_id = $1 AND cu.code = '7A'",
+         WHERE cu.id = so.unit_id AND so.trip_id = $1 AND cu.code = '10D'",
     )
     .bind(legs3[2])
     .execute(&pool)
@@ -362,7 +385,7 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
     ]
     .iter()
     .map(|(trip, origin, destination)| {
-        json!({"trip_id": trip, "items": [{"unit_code": "7A", "origin": origin, "destination": destination}]})
+        json!({"trip_id": trip, "items": [{"unit_code": "10D", "origin": origin, "destination": destination}]})
     })
     .collect();
     let (status, conflict) = call(
@@ -380,12 +403,12 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
 
     // Legs 1 and 2 must be fully released — nothing partial survived.
     assert_eq!(
-        seat_mask(&pool, legs3[0], "7A").await,
+        seat_mask(&pool, legs3[0], "10D").await,
         0,
         "leg 1 rolled back"
     );
     assert_eq!(
-        seat_mask(&pool, legs3[1], "7A").await,
+        seat_mask(&pool, legs3[1], "10D").await,
         0,
         "leg 2 rolled back"
     );

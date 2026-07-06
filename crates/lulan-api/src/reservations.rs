@@ -15,8 +15,27 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// Operator-configurable hold window (admin-settable via env; a runtime
+/// settings API arrives with the Phase 7.5 admin surface). Holds ALWAYS
+/// expire — an eternal hold is an inventory denial-of-service — so the
+/// requested TTL is clamped to [MIN, max].
 const DEFAULT_HOLD_TTL_SECS: u64 = 600;
 const MAX_HOLD_TTL_SECS: u64 = 1800;
+const MIN_HOLD_TTL_SECS: u64 = 30;
+
+fn default_hold_ttl() -> u64 {
+    std::env::var("LULAN_HOLD_DEFAULT_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_HOLD_TTL_SECS)
+}
+
+fn max_hold_ttl() -> u64 {
+    std::env::var("LULAN_HOLD_MAX_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MAX_HOLD_TTL_SECS)
+}
 
 /// One seat to hold. Holds cover seats only; pools are claimed at order
 /// time.
@@ -143,8 +162,8 @@ pub async fn create_hold(
 
     let ttl = std::time::Duration::from_secs(
         req.ttl_seconds
-            .unwrap_or(DEFAULT_HOLD_TTL_SECS)
-            .min(MAX_HOLD_TTL_SECS),
+            .unwrap_or_else(default_hold_ttl)
+            .clamp(MIN_HOLD_TTL_SECS, max_hold_ttl()),
     );
     let hold = holds
         .acquire_itinerary(&seats, ttl)

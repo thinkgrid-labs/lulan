@@ -38,9 +38,15 @@ pub struct PoolAvailability {
 
 #[derive(Debug, Serialize)]
 pub struct SeatAvailability {
+    #[serde(skip)]
+    pub unit_id: Uuid,
     pub code: String,
     pub fare_class: String,
+    /// Free to CLAIM on this span (sold-state only).
     pub available: bool,
+    /// Another session currently soft-holds an overlapping span. Advisory
+    /// (Redis) — enriched by the API layer; false when holds are down.
+    pub held: bool,
 }
 
 /// The carrier/agency operating a trip (airline, ferry line, bus company).
@@ -435,7 +441,8 @@ impl InventoryStore {
 
         let seat_rows = sqlx::query(
             r#"
-            SELECT cu.code, cu.fare_class, (so.occupied_mask & $2) = 0 AS available
+            SELECT cu.id AS unit_id, cu.code, cu.fare_class,
+                   (so.occupied_mask & $2) = 0 AS available
             FROM seat_occupancy so
             JOIN capacity_units cu ON cu.id = so.unit_id
             WHERE so.trip_id = $1
@@ -451,9 +458,11 @@ impl InventoryStore {
             .into_iter()
             .map(|row| {
                 Ok(SeatAvailability {
+                    unit_id: row.try_get("unit_id")?,
                     code: row.try_get("code")?,
                     fare_class: row.try_get("fare_class")?,
                     available: row.try_get("available")?,
+                    held: false,
                 })
             })
             .collect::<Result<Vec<_>, sqlx::Error>>()?;

@@ -9,7 +9,8 @@ use chrono::NaiveDate;
 use lulan_engine::domain::{OrderStatus, PassengerType};
 use lulan_engine::events::StoredEvent;
 use lulan_engine::orders::{
-    CreateOutcome, ItemValidation, NewOrderItem, NewPassenger, OrderRecord, TransitionOutcome,
+    CreateOutcome, ItemValidation, NewOrderAncillary, NewOrderItem, NewPassenger, OrderRecord,
+    TransitionOutcome,
 };
 use lulan_engine::payments::{FakeProvider, PaymentProvider};
 use lulan_engine::ticket::TicketStore;
@@ -48,6 +49,10 @@ pub struct CreateOrderRequest {
     /// claims succeed; a claim is authoritative with or without it.
     #[serde(default)]
     hold_id: Option<Uuid>,
+    /// Add-ons from GET /v1/ancillaries (must match the quote token when
+    /// one is presented).
+    #[serde(default)]
+    ancillaries: Vec<crate::ancillaries::AncillaryLine>,
 }
 
 #[derive(Deserialize)]
@@ -198,6 +203,34 @@ pub async fn create(
         .iter()
         .flat_map(|(trip_id, items)| items.iter().map(move |i| (*trip_id, i)))
         .collect();
+
+    // A presented hold must be alive — the deterministic "session expired,
+    // re-select your seats" moment clients rely on. Deliberately checked
+    // BEFORE pricing so the customer isn't shown a price they can't get.
+    // Redis being down never blocks a sale (ADR 0002): verification errors
+    // fall through to the authoritative claims. Orders without a hold_id
+    // skip all of this.
+    if let (Some(hold_id), Ok(holds)) = (req.hold_id, state.holds()) {
+        match holds.itinerary_members(hold_id).await {
+            Ok(Some(members)) => {
+                let covers_trip = |trip_id: &Uuid| members.iter().any(|m| m.trip_id == *trip_id);
+                if !flat.iter().all(|(trip_id, _)| covers_trip(trip_id)) {
+                    return Err(ApiError::Conflict(
+                        "hold does not cover this itinerary's trips".into(),
+                    ));
+                }
+            }
+            Ok(None) => {
+                return Err(ApiError::Conflict(
+                    "hold expired — the seats were released; re-select and hold again (or retry without hold_id)"
+                        .into(),
+                ));
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, %hold_id, "hold verification unavailable — proceeding to claims");
+            }
+        }
+    }
     let context = crate::pricing::journey_context(
         &journeys
             .iter()
@@ -219,12 +252,14 @@ pub async fn create(
             .collect::<Vec<_>>(),
     );
 
+    let mut quote_ancillaries: Option<Vec<crate::quotes::QuoteTokenAncillary>> = None;
     let items: Vec<NewOrderItem> = match &req.quote_token {
         Some(token) => {
             // Honour quoted prices — untampered, unexpired, covering every
             // requested item on its exact trip, including passenger type.
             let quote = crate::quotes::verify(&state.quote_secret, token)
                 .ok_or_else(|| ApiError::BadRequest("invalid or expired quote token".into()))?;
+            quote_ancillaries = Some(quote.ancillaries);
             let mut items = Vec::with_capacity(flat.len());
             for (trip_id, item) in &flat {
                 let quantity = item.quantity.unwrap_or(1);
@@ -297,7 +332,57 @@ pub async fn create(
         }
     };
 
-    match orders.create(&passengers, &items).await? {
+    // Ancillary lines: validated against the catalog; with a quote token
+    // they must match the quoted lines verbatim (same code/leg/passenger/
+    // quantity) at the locked totals.
+    let itinerary_trips: Vec<Uuid> = journeys.iter().map(|(trip_id, _)| *trip_id).collect();
+    let priced_ancillaries =
+        crate::ancillaries::price_lines(pool, &req.ancillaries, &itinerary_trips).await?;
+    let ancillary_lines: Vec<NewOrderAncillary> = match &quote_ancillaries {
+        Some(quoted) => {
+            let mut lines = Vec::with_capacity(priced_ancillaries.len());
+            if quoted.len() != priced_ancillaries.len() {
+                return Err(ApiError::BadRequest(
+                    "ancillaries differ from the quote — re-quote or match them exactly".into(),
+                ));
+            }
+            for priced in &priced_ancillaries {
+                let locked = quoted
+                    .iter()
+                    .find(|q| q.line == priced.line)
+                    .ok_or_else(|| {
+                        ApiError::BadRequest(format!(
+                            "ancillary {} is not covered by the quote",
+                            priced.line.code
+                        ))
+                    })?;
+                lines.push(NewOrderAncillary {
+                    ancillary_id: priced.ancillary.id,
+                    code: priced.ancillary.code.clone(),
+                    name: priced.ancillary.name.clone(),
+                    trip_id: priced.line.trip_id,
+                    passenger_index: priced.line.passenger,
+                    quantity: priced.line.quantity,
+                    total_minor: locked.total_minor,
+                });
+            }
+            lines
+        }
+        None => priced_ancillaries
+            .iter()
+            .map(|priced| NewOrderAncillary {
+                ancillary_id: priced.ancillary.id,
+                code: priced.ancillary.code.clone(),
+                name: priced.ancillary.name.clone(),
+                trip_id: priced.line.trip_id,
+                passenger_index: priced.line.passenger,
+                quantity: priced.line.quantity,
+                total_minor: priced.total_minor,
+            })
+            .collect(),
+    };
+
+    match orders.create(&passengers, &items, &ancillary_lines).await? {
         CreateOutcome::Created(record) => {
             // Attach ownership/contact (created in the same request, so
             // visible before the response ever leaves).

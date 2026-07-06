@@ -112,15 +112,36 @@ pub struct AvailabilityParams {
 }
 
 /// GET /v1/trips/{trip_id}/availability?origin=BTG&destination=CTC
+///
+/// `available` reflects the sold state (source of truth); `held` marks
+/// seats another session is soft-holding right now — the seat map greys
+/// them out. Held state is advisory: it degrades to `false` when Redis is
+/// unavailable, and a hold never blocks the authoritative claim.
 pub async fn availability(
     State(state): State<AppState>,
     Path(trip_id): Path<Uuid>,
     Query(params): Query<AvailabilityParams>,
 ) -> Result<Json<TripAvailability>, ApiError> {
     let store = state.inventory()?;
-    let availability = store
+    let mut availability = store
         .trip_availability(trip_id, &params.origin, &params.destination)
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("trip {trip_id} not found")))?;
+
+    if let Ok(holds) = state.holds()
+        && let Ok(span) =
+            lulan_engine::domain::SegmentSpan::new(availability.from_index, availability.to_index)
+    {
+        match holds.held_units(trip_id, span).await {
+            Ok(held) => {
+                for seat in &mut availability.seats {
+                    seat.held = held.contains(&seat.unit_id);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "hold lookup unavailable — held flags omitted");
+            }
+        }
+    }
     Ok(Json(availability))
 }

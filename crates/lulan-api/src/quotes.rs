@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
 
+use crate::ancillaries::AncillaryLine;
 use crate::error::ApiError;
 use crate::pricing::{JourneyItem, PriceableItem, journey_context, price_items};
 use crate::state::AppState;
@@ -32,6 +33,17 @@ pub struct QuoteToken {
     /// Unix seconds after which the quote is dead.
     pub exp: i64,
     pub items: Vec<QuoteTokenItem>,
+    /// Add-on lines with their locked totals; matched verbatim at order
+    /// time.
+    #[serde(default)]
+    pub ancillaries: Vec<QuoteTokenAncillary>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct QuoteTokenAncillary {
+    #[serde(flatten)]
+    pub line: AncillaryLine,
+    pub total_minor: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,6 +100,9 @@ pub struct QuoteRequest {
     journeys: Option<Vec<JourneyRequest>>,
     #[serde(default)]
     promo_code: Option<String>,
+    /// Add-ons from GET /v1/ancillaries; priced into the total and token.
+    #[serde(default)]
+    ancillaries: Vec<AncillaryLine>,
 }
 
 /// Normalise either request shape into journeys. Shared with orders.
@@ -126,10 +141,23 @@ pub struct QuoteResponse {
     journey_count: u32,
     is_round_trip: bool,
     items: Vec<QuotedItem>,
+    ancillaries: Vec<QuotedAncillary>,
     total_minor: i64,
     expires_at: chrono::DateTime<Utc>,
     /// Present this at POST /v1/orders to buy at exactly these prices.
     quote_token: String,
+}
+
+#[derive(Serialize)]
+pub struct QuotedAncillary {
+    code: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trip_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    passenger: Option<usize>,
+    quantity: i32,
+    total_minor: i64,
 }
 
 #[derive(Serialize)]
@@ -167,8 +195,17 @@ pub async fn create(
 
     let priced = price_items(&state, &items, req.promo_code.as_deref(), context).await?;
 
+    let itinerary_trips: Vec<Uuid> = journeys.iter().map(|(trip_id, _)| *trip_id).collect();
+    let pool = state.db.as_ref().expect("price_items checked db");
+    let priced_ancillaries =
+        crate::ancillaries::price_lines(pool, &req.ancillaries, &itinerary_trips).await?;
+
     let currency = priced[0].quote.currency.clone();
-    let total_minor: i64 = priced.iter().map(|p| p.quote.total_minor).sum();
+    let total_minor: i64 = priced.iter().map(|p| p.quote.total_minor).sum::<i64>()
+        + priced_ancillaries
+            .iter()
+            .map(|a| a.total_minor)
+            .sum::<i64>();
     let exp = Utc::now().timestamp() + QUOTE_TTL_SECONDS;
 
     let token = QuoteToken {
@@ -185,6 +222,13 @@ pub async fn create(
                 quantity: p.quantity,
                 passenger_type: p.passenger_type.clone(),
                 price_minor: p.quote.total_minor,
+            })
+            .collect(),
+        ancillaries: priced_ancillaries
+            .iter()
+            .map(|a| QuoteTokenAncillary {
+                line: a.line.clone(),
+                total_minor: a.total_minor,
             })
             .collect(),
     };
@@ -204,6 +248,17 @@ pub async fn create(
                 quantity: p.quantity,
                 passenger_type: p.passenger_type,
                 quote: p.quote,
+            })
+            .collect(),
+        ancillaries: priced_ancillaries
+            .into_iter()
+            .map(|a| QuotedAncillary {
+                code: a.ancillary.code,
+                name: a.ancillary.name,
+                trip_id: a.line.trip_id,
+                passenger: a.line.passenger,
+                quantity: a.line.quantity,
+                total_minor: a.total_minor,
             })
             .collect(),
         total_minor,

@@ -223,6 +223,63 @@ async fn hold_flow_protects_spans_and_feeds_claims() {
     assert_eq!(status, StatusCode::CREATED);
     let hold_id = hold["hold_id"].as_str().unwrap().to_string();
 
+    // Other sessions see the held seat greyed out on overlapping spans —
+    // and NOT on disjoint ones (held state is span-aware).
+    let seat_state = |body: &Value, code: &str| -> (bool, bool) {
+        let seat = body["seats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["code"] == code)
+            .unwrap();
+        (
+            seat["available"].as_bool().unwrap(),
+            seat["held"].as_bool().unwrap(),
+        )
+    };
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/trips/{trip_id}/availability?origin=BTG&destination=CTC"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(seat_state(&body, "3C"), (true, true), "held but not sold");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/trips/{trip_id}/availability?origin=ILO&destination=CEB"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        seat_state(&body, "3C"),
+        (true, false),
+        "disjoint span is free"
+    );
+
     // Overlapping hold must be rejected; non-overlapping must be admitted.
     let (status, _) = post_json(
         &app,

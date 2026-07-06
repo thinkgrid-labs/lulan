@@ -106,7 +106,10 @@ export interface TripSearchResult {
 export interface SeatAvailability {
   code: string;
   fare_class: string;
+  /** Free to claim (sold state — the source of truth). */
   available: boolean;
+  /** Another session soft-holds an overlapping span right now (advisory). */
+  held: boolean;
 }
 
 export interface AvailabilityResponse {
@@ -155,6 +158,10 @@ export interface Quote {
   /** Locks these prices at checkout for ~5 minutes. */
   quote_token: string;
   items: QuotedItem[];
+  ancillaries: Array<{
+    code: string; name: string; trip_id?: string; passenger?: number;
+    quantity: number; total_minor: number;
+  }>;
 }
 
 export interface OrderItemRequest {
@@ -183,6 +190,8 @@ export interface CreateOrderRequest {
   promo_code?: string;
   /** Itinerary hold from createHold, released once the order's claims succeed. */
   hold_id?: string;
+  /** Add-ons; must match the quote token's lines when a token is presented. */
+  ancillaries?: AncillaryLine[];
 }
 
 export interface OrderItem {
@@ -215,6 +224,7 @@ export interface Order {
   expires_at: string | null;
   passengers: PassengerRecord[];
   items: OrderItem[];
+  ancillaries: OrderAncillary[];
 }
 
 export interface CreatedOrder extends Order {
@@ -275,6 +285,37 @@ export interface CustomerOrderSummary {
   total_minor: number;
   currency: string;
   created_at: string;
+}
+
+export interface Ancillary {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  /** Grouping for display: baggage, meal, insurance, service… */
+  kind: string;
+  price_minor: number;
+  per: "passenger" | "order";
+  scope: "journey" | "itinerary";
+}
+
+/** Same shape at quote and order — the token match is verbatim. */
+export interface AncillaryLine {
+  code: string;
+  /** Journey-scoped add-ons: which leg. */
+  trip_id?: string;
+  /** Per-passenger add-ons: index into passengers[]. */
+  passenger?: number;
+  quantity?: number;
+}
+
+export interface OrderAncillary {
+  code: string;
+  name: string;
+  trip_id: string | null;
+  passenger_id: string | null;
+  quantity: number;
+  total_minor: number;
 }
 
 export interface HoldItem {
@@ -415,11 +456,16 @@ export class LulanClient {
 
   createQuote(
     request:
-      | { trip_id: string; items: QuoteItemRequest[]; promo_code?: string }
-      | { journeys: Journey<QuoteItemRequest>[]; promo_code?: string },
+      | { trip_id: string; items: QuoteItemRequest[]; promo_code?: string; ancillaries?: AncillaryLine[] }
+      | { journeys: Journey<QuoteItemRequest>[]; promo_code?: string; ancillaries?: AncillaryLine[] },
     options?: RequestOptions,
   ): Promise<Quote> {
     return this.request("POST", "/v1/quotes", request, options);
+  }
+
+  /** The operator's add-on catalog (baggage, meals, insurance, …). */
+  ancillaries(options?: RequestOptions): Promise<Ancillary[]> {
+    return this.request("GET", "/v1/ancillaries", undefined, options);
   }
 
   createOrder(request: CreateOrderRequest, options?: RequestOptions): Promise<CreatedOrder> {

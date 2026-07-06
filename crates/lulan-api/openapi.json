@@ -3,7 +3,7 @@
   "info": {
     "title": "Lulan API",
     "description": "Open-source headless reservation engine for transit: segment-aware inventory, race-free booking, itineraries (one-way, round-trip, multi-city), signed quotes, per-passenger Ed25519 QR tickets with offline validation, webhooks, and API-key auth.\n\nAuthentication: storefront endpoints (search, quotes, orders) work unauthenticated with guest checkout (`guest_contact` + retrieval token) or with a customer JWT (`Authorization: Bearer <jwt>`, operator IdP). Server-to-server endpoints take an API key via `X-Api-Key` — roles: `operator_admin` (webhooks/keys), `integration` (read any order), `validator` (scan sync). `POST /v1/orders` honours an `Idempotency-Key` header: the first 201 for a key is stored and replayed verbatim on retries.",
-    "version": "0.6.5",
+    "version": "0.6.6",
     "license": {
       "name": "AGPL-3.0",
       "identifier": "AGPL-3.0-only"
@@ -303,7 +303,7 @@
             "$ref": "#/components/responses/BadRequest"
           },
           "409": {
-            "description": "An item lost the race; nothing was booked"
+            "description": "An item lost the race and nothing was booked — or the presented hold_id has expired / does not cover the itinerary (re-hold or retry without hold_id)"
           },
           "429": {
             "$ref": "#/components/responses/RateLimited"
@@ -919,6 +919,138 @@
           }
         }
       }
+    },
+    "/v1/ancillaries": {
+      "get": {
+        "summary": "Add-on catalog (public)",
+        "description": "Everything the operator sells alongside the fare — baggage, meals, insurance, priority boarding. Add lines to quotes/orders via their codes. No hold required: nothing here is scarce (scarce add-ons are capacity units — extra legroom is a seat, baggage kilos are the cargo pool).",
+        "tags": [
+          "ancillaries"
+        ],
+        "responses": {
+          "200": {
+            "description": "Active catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Ancillary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Add a catalog entry (admin)",
+        "tags": [
+          "ancillaries"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "name",
+                  "kind",
+                  "price_minor"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "price_minor": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "per": {
+                    "type": "string",
+                    "enum": [
+                      "passenger",
+                      "order"
+                    ],
+                    "default": "passenger"
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "journey",
+                      "itinerary"
+                    ],
+                    "default": "itinerary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ancillary"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Code already exists"
+          }
+        }
+      }
+    },
+    "/v1/ancillaries/{id}": {
+      "delete": {
+        "summary": "Deactivate a catalog entry (admin; sold orders keep their snapshots)",
+        "tags": [
+          "ancillaries"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deactivated"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1161,6 +1293,13 @@
             "type": "string",
             "format": "uuid",
             "description": "Itinerary hold from POST /v1/holds, released once the order's claims succeed"
+          },
+          "ancillaries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AncillaryLine"
+            },
+            "description": "Must match the quote token's lines verbatim when a token is presented"
           }
         },
         "description": "An itinerary: either journeys[] (round-trip / multi-city) or the single-trip shape trip_id + items (sugar for a one-journey itinerary). Trip type is derived: 1 journey = one-way; 2 journeys with reversed O&D = round-trip (round-trip fare rules apply); otherwise multi-city."
@@ -1267,6 +1406,37 @@
               "format": "uuid"
             },
             "description": "Distinct trips this itinerary touches, in item order"
+          },
+          "ancillaries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "trip_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "nullable": true
+                },
+                "passenger_id": {
+                  "type": "string",
+                  "format": "uuid",
+                  "nullable": true
+                },
+                "quantity": {
+                  "type": "integer"
+                },
+                "total_minor": {
+                  "type": "integer",
+                  "format": "int64"
+                }
+              }
+            }
           }
         }
       },
@@ -1415,6 +1585,13 @@
             "items": {
               "$ref": "#/components/schemas/QuoteJourney"
             }
+          },
+          "ancillaries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AncillaryLine"
+            },
+            "description": "Priced into the total and locked by the quote token"
           }
         },
         "description": "Same itinerary shapes as order creation: journeys[] or trip_id + items."
@@ -1492,6 +1669,34 @@
           },
           "is_round_trip": {
             "type": "boolean"
+          },
+          "ancillaries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "trip_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "passenger": {
+                  "type": "integer"
+                },
+                "quantity": {
+                  "type": "integer"
+                },
+                "total_minor": {
+                  "type": "integer",
+                  "format": "int64"
+                }
+              }
+            }
           }
         }
       },
@@ -1537,7 +1742,7 @@
           },
           "ttl_seconds": {
             "type": "integer",
-            "description": "Hold lifetime (default 600, max 1800)"
+            "description": "Hold lifetime in seconds. Clamped to the operator's window (default 600, min 30, max 1800; configurable via LULAN_HOLD_DEFAULT_TTL_SECS / LULAN_HOLD_MAX_TTL_SECS). Holds always expire and auto-release their seats."
           }
         }
       },
@@ -1673,6 +1878,10 @@
                 },
                 "available": {
                   "type": "boolean"
+                },
+                "held": {
+                  "type": "boolean",
+                  "description": "Another session soft-holds an overlapping span right now (advisory; false when holds are unavailable). available reflects sold state only."
                 }
               }
             }
@@ -2038,6 +2247,72 @@
           },
           "destination": {
             "type": "string"
+          }
+        }
+      },
+      "Ancillary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string",
+            "example": "MEAL_STD"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "Grouping for display (baggage, meal, insurance, service…)"
+          },
+          "price_minor": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "per": {
+            "type": "string",
+            "enum": [
+              "passenger",
+              "order"
+            ]
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "journey",
+              "itinerary"
+            ]
+          }
+        }
+      },
+      "AncillaryLine": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "description": "Same shape at quote and order — the token match is verbatim.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "trip_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Required for journey-scoped add-ons: which leg"
+          },
+          "passenger": {
+            "type": "integer",
+            "description": "Required for per-passenger add-ons: index into passengers[]"
+          },
+          "quantity": {
+            "type": "integer",
+            "default": 1
           }
         }
       }
