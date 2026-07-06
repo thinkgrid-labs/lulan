@@ -5,7 +5,9 @@
 [![SDKs: MIT](https://img.shields.io/badge/SDKs%20%26%20validators-MIT-green.svg)](#license)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
-**Lulan is an open-source, API-first reservation system for airlines, buses, ferries, rail, and any operator that sells capacity instead of products.** It is a headless booking engine written in Rust: segment-aware seat inventory, race-free reservations under high concurrency, event-sourced order lifecycle, a sandboxed WebAssembly pricing engine, and cryptographically signed QR tickets that validate **fully offline**.
+**Lulan is an open-source, API-first reservation platform for airlines, buses, ferries, rail, and any operator that sells capacity instead of products.** It runs in two modes behind one API: a **complete standalone booking engine** — inventory, pricing, payments, QR ticketing, offline validation, end to end — or an **orchestration layer** that owns the customer-facing reservation experience and synchronizes confirmed bookings into the operational systems you already run (airline PSS, ferry manifest backend, bus dispatch) through sync connectors.
+
+Built in Rust: segment-aware seat inventory, race-free reservations under high concurrency, event-sourced order lifecycle, a sandboxed WebAssembly pricing engine, and cryptographically signed QR tickets that validate **fully offline**. Lulan is deliberately **not a Passenger Service System** — like Stripe orchestrates payments without replacing banks, Lulan modernizes selling and reserving without touching flight ops, DCS, baggage, settlement, or crew. Keep Navitaire; upgrade the customer experience.
 
 Think "Medusa or commerce tools, but for seats, cabins, vehicle slots, and cargo holds" — inventory that exists in **space and time**, not on a shelf.
 
@@ -18,6 +20,7 @@ Think "Medusa or commerce tools, but for seats, cabins, vehicle slots, and cargo
 - [How it works](#how-it-works)
 - [Quick start](#quick-start)
 - [API overview](#api-overview)
+- [Bring your own providers](#bring-your-own-providers)
 - [Architecture](#architecture)
 - [Benchmarks](#benchmarks)
 - [Project status & roadmap](#project-status--roadmap)
@@ -126,6 +129,64 @@ just loadgen-paced 200 30  # open-loop 200 req/s — honest seat-lock latencies
 
 The full surface is documented in the OpenAPI spec — committed at [`crates/lulan-api/openapi.json`](crates/lulan-api/openapi.json) and served live at `GET /openapi.json`. A typed TypeScript client ships as [`@lulan/storefront-sdk`](packages/storefront-sdk).
 
+## Bring your own providers
+
+Lulan never owns accounts and never touches card data — identity and
+payments are **ports**: the core defines the contract, an adapter plugs
+your provider in. (Reservation Sync Connectors, planned, follow the same
+pattern for operational systems.)
+
+### Identity provider — customers and staff
+
+The core verifies a bearer JWT from *your* IdP and keeps only an
+`(issuer, subject)` reference. No passwords, resets, sessions, or MFA in
+Lulan — ever. One port serves both principals: a plain verified JWT is a
+**customer**; a JWT that matches an enrolled `staff` row gains an
+operator role (`admin` / `ops` / `support`).
+
+```bash
+# Ships today: HS256 shared-secret JWT (first-party storefront backends)
+LULAN_IDP_ISSUER=https://auth.example.com
+LULAN_IDP_HS256_SECRET=...            # your IdP's signing secret
+LULAN_BOOTSTRAP_ADMIN_STAFF='https://auth.example.com|user-id-of-admin'
+```
+
+| Use case | How it maps |
+|---|---|
+| Ferry line with a Next.js storefront using **Supabase/Firebase auth** | Storefront session JWT goes straight to Lulan as the customer token — bookings attach to the customer, `GET /v1/customers/me/orders` lists them |
+| Bus company on **Auth0 / Clerk / Keycloak** | Same trait, JWKS (RS256) adapter — planned; one adapter covers all JWKS-publishing IdPs |
+| Walk-up / kiosk sales, no accounts at all | Skip the IdP entirely: **guest checkout** is first-class — `guest_contact` + an HMAC retrieval token (magic link) per order |
+| Back-office staff signing into the admin app | Same IdP login; an admin enrols their identity via `POST /v1/admin/staff` with a role — every action they take is audited by name |
+
+### Payment provider — charge and refund
+
+The engine reconciles provider webhooks against the order state machine;
+the provider port is two calls:
+
+```rust
+pub trait PaymentProvider {
+    /// Charge amount_minor for an order → provider intent (e.g. pi_…).
+    async fn create_intent(&self, order_id, amount_minor, currency) -> PaymentIntent;
+    /// Full refund of a captured intent (admin refunds, trip cancellation).
+    async fn refund(&self, payment_intent_id, amount_minor) -> Result<()>;
+}
+```
+
+Ships today: `FakeProvider` (drives dev, tests, and every demo — including
+the async webhook flow, exactly like a real provider). Real adapters are
+adapter-sized work, not engine work:
+
+| Use case | How it maps |
+|---|---|
+| Global card payments (**Stripe**) | `create_intent` → PaymentIntent; Stripe's `payment_intent.succeeded` webhook hits Lulan's capture endpoint → order Paid → tickets auto-issue |
+| PH market e-wallets — GCash/Maya via **Xendit or PayMongo** | Same flow; the intent id is the provider's charge/checkout id |
+| Cash at a counter / agent network | A trusted `integration` API key confirms payment through the same webhook path — the state machine doesn't care who captured |
+| Trip cancelled by ops, or support refunds a booking | Lulan calls `refund()` **before** releasing seats and voiding tickets — money moves first, inventory second |
+
+Payment capture is idempotent (duplicate and out-of-order webhooks are
+acknowledged, never re-applied), and `Idempotency-Key` on order creation
+makes client retries double-booking-proof end to end.
+
 ## Architecture
 
 ```
@@ -181,10 +242,13 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] Admin operations API: staff RBAC (IdP-backed), network & schedule management, fare publishing with rollback, manifests, refunds — with `@lulan/admin-sdk`
 - [ ] Reference Next.js storefront + React Native boarding-crew app
 - [ ] `@lulan/validate` npm package (WASM build of the validator)
+- [ ] Reservation Sync Connectors — first-class orchestrated mode (PSS / manifest / dispatch sync, external-ref mapping)
 
 ## Use cases
 
 Lulan models any business that reserves **capacity over space and time**: regional and low-cost airlines, intercity and commuter bus lines, ferries and RoRo vessels, rail and metro networks, shuttle and van fleets, cargo and parcel space and vehicle-deck slots
+
+**Standalone mode** fits operators without a sophisticated backend — provincial bus lines, ferry and tourism operators, shuttles, charters, small regional airlines: Lulan is the whole system, from search to boarding. **Orchestrated mode** fits enterprises with existing operational platforms: Lulan owns discovery → pricing → cart → payment → confirmed reservation, then a Reservation Sync Connector pushes it into the PSS / manifest system / dispatch backend (planned; today's HMAC-signed webhooks already enable the same integration DIY). Same API and domain model either way — only the connector changes.
 
 ## Contributing
 
@@ -201,6 +265,6 @@ Lulan is developed in the open and welcomes issues, design discussions, and pull
 
 ---
 
-**Keywords**: open-source reservation system · headless booking engine · airline reservation system · bus booking system · ferry reservation software · rail ticketing · seat reservation API · segment inventory · Rust booking engine · offline ticket validation · QR ticketing · WebAssembly pricing
+**Keywords**: open-source reservation system · headless booking engine · reservation orchestration platform · airline reservation system · bus booking system · ferry reservation software · rail ticketing · seat reservation API · segment inventory · Rust booking engine · offline ticket validation · QR ticketing · WebAssembly pricing
 
 *Lulan aims to be the open-source foundation for capacity reservation worldwide — bringing modern developer tooling to an industry still dominated by legacy software. The name comes from the Filipino word for "to board, to load." Transportation is only the beginning.*
