@@ -1,0 +1,19 @@
+{
+  "name": "@lulan/admin-sdk",
+  "version": "0.7.5",
+  "description": "Typed TypeScript client for the Lulan admin operations API — staff RBAC, network & schedule management, fare publishing, manifests, refunds.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thinkgrid-labs/lulan.git",
+    "directory": "packages/admin-sdk"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "src"],
+  "scripts": { "build": "tsc", "typecheck": "tsc --noEmit" },
+  "devDependencies": { "typescript": "^5.6.0" },
+  "engines": { "node": ">=18" }
+}

@@ -1,6 +1,7 @@
 //! Lulan API: HTTP layer over the engine. Library crate so integration
 //! tests (and later the loadgen harness) can drive the router directly.
 
+pub mod admin;
 pub mod ancillaries;
 pub mod auth;
 pub mod config;
@@ -15,6 +16,7 @@ pub mod quotes;
 pub mod rate_limit;
 pub mod reservations;
 pub mod seed;
+pub mod staff;
 pub mod state;
 pub mod tickets;
 pub mod trips;
@@ -83,6 +85,30 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/api-keys", post(auth::create_key))
         .route("/v1/api-keys/{id}", axum::routing::delete(auth::revoke_key))
+        .route(
+            "/v1/admin/staff",
+            post(admin::enroll_staff).get(admin::list_staff),
+        )
+        .route(
+            "/v1/admin/staff/{id}",
+            axum::routing::delete(admin::revoke_staff),
+        )
+        .route(
+            "/v1/admin/fare-rules",
+            post(admin::publish_fare_rules).get(admin::list_fare_rules),
+        )
+        .route(
+            "/v1/admin/fare-rules/{id}/activate",
+            post(admin::activate_fare_rules),
+        )
+        .route("/v1/admin/locations", post(admin::create_location))
+        .route("/v1/admin/routes", post(admin::create_route))
+        .route("/v1/admin/vessels", post(admin::create_vessel))
+        .route("/v1/admin/trips", post(admin::create_trips))
+        .route("/v1/admin/trips/{id}/cancel", post(admin::cancel_trip))
+        .route("/v1/admin/trips/{id}/manifest", get(admin::trip_manifest))
+        .route("/v1/admin/orders", get(admin::search_orders))
+        .route("/v1/admin/orders/{id}/refund", post(admin::refund_order))
         .route("/metrics", get(metrics::render))
         .route(
             "/openapi.json",

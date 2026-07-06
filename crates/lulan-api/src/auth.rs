@@ -107,8 +107,17 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
     }
 }
 
-/// Extractor requiring the `operator_admin` role.
-pub struct AdminAuth(pub ApiKeyAuth);
+/// Who performed an audited action — a machine credential, a human
+/// staffer, or (never) both.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Actor {
+    pub api_key_id: Option<Uuid>,
+    pub staff_id: Option<Uuid>,
+}
+
+/// Extractor for the operator-admin surface: an `operator_admin` API key
+/// OR an enrolled `admin` staff JWT (Phase 7.5) both work.
+pub struct AdminAuth(pub Actor);
 
 impl FromRequestParts<AppState> for AdminAuth {
     type Rejection = ApiError;
@@ -117,11 +126,39 @@ impl FromRequestParts<AppState> for AdminAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let auth = ApiKeyAuth::from_request_parts(parts, state).await?;
-        if auth.role != ApiRole::OperatorAdmin {
-            return Err(ApiError::Forbidden("operator_admin role required"));
+        // Machine credential first (llk_… keys are unambiguous).
+        if let Some(key) = bearer_or_api_key(parts) {
+            let pool = state
+                .db
+                .as_ref()
+                .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
+            let auth = authenticate(pool, &key)
+                .await
+                .map_err(|e| ApiError::Internal(e.into()))?
+                .ok_or(ApiError::Unauthorized("unknown or inactive API key"))?;
+            if auth.role != ApiRole::OperatorAdmin {
+                return Err(ApiError::Forbidden("operator_admin role required"));
+            }
+            return Ok(AdminAuth(Actor {
+                api_key_id: Some(auth.key_id),
+                staff_id: None,
+            }));
         }
-        Ok(AdminAuth(auth))
+        // Otherwise a human: enrolled admin staff via the IdP. A valid
+        // identity without enrolment (or role) is 403; no token is 401.
+        if crate::identity::bearer_subject(state, &parts.headers).is_none() {
+            return Err(ApiError::Unauthorized(
+                "admin API key or admin staff token required",
+            ));
+        }
+        match crate::staff::resolve(state, parts).await? {
+            Some(member) if member.role == crate::staff::StaffRole::Admin => Ok(AdminAuth(Actor {
+                api_key_id: None,
+                staff_id: Some(member.staff_id),
+            })),
+            Some(_) => Err(ApiError::Forbidden("admin role required")),
+            None => Err(ApiError::Forbidden("not enrolled as staff")),
+        }
     }
 }
 
@@ -143,19 +180,23 @@ impl FromRequestParts<AppState> for DeviceAuth {
     }
 }
 
-/// Record an audited admin action.
+/// Record an audited admin action with WHO did it — the credential for
+/// machines, the human for staff.
 pub async fn audit(
     pool: &PgPool,
-    key_id: Uuid,
+    actor: Actor,
     action: &str,
     detail: serde_json::Value,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO audit_log (api_key_id, action, detail) VALUES ($1, $2, $3)")
-        .bind(key_id)
-        .bind(action)
-        .bind(detail)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "INSERT INTO audit_log (api_key_id, staff_id, action, detail) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(actor.api_key_id)
+    .bind(actor.staff_id)
+    .bind(action)
+    .bind(detail)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -219,7 +260,7 @@ pub async fn create_key(
         .map_err(|e| ApiError::Internal(e.into()))?;
     audit(
         pool,
-        admin.0.key_id,
+        admin.0,
         "api_key.created",
         serde_json::json!({ "id": id, "label": req.label.trim(), "role": role.as_str() }),
     )
@@ -255,7 +296,7 @@ pub async fn revoke_key(
     }
     audit(
         pool,
-        admin.0.key_id,
+        admin.0,
         "api_key.revoked",
         serde_json::json!({ "id": id }),
     )

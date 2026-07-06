@@ -33,6 +33,14 @@ pub trait PaymentProvider: Send + Sync {
         amount_minor: i64,
         currency: &str,
     ) -> impl Future<Output = Result<PaymentIntent, PaymentError>> + Send;
+
+    /// Refund a captured intent in full. Providers that refund
+    /// asynchronously should still return Ok once the refund is accepted.
+    fn refund(
+        &self,
+        payment_intent_id: &str,
+        amount_minor: i64,
+    ) -> impl Future<Output = Result<(), PaymentError>> + Send;
 }
 
 /// Dev/test provider: always succeeds at intent creation and "notifies" via
@@ -51,5 +59,13 @@ impl PaymentProvider for FakeProvider {
             id: format!("fake_pi_{}", Uuid::new_v4().simple()),
             status: IntentStatus::Pending,
         })
+    }
+
+    async fn refund(
+        &self,
+        _payment_intent_id: &str,
+        _amount_minor: i64,
+    ) -> Result<(), PaymentError> {
+        Ok(())
     }
 }

@@ -572,6 +572,26 @@ impl OrderStore {
 
     /// One lifecycle step under the order row lock: check legality via the
     /// pure state machine, update the read model, append exactly one event.
+    /// Paid/Ticketed → Refunded: releases every claim on every leg and
+    /// voids the order's tickets, atomically. The caller is responsible
+    /// for the provider-side refund BEFORE calling this (money first,
+    /// then inventory — a failed provider call must not free seats).
+    pub async fn refund(&self, order_id: Uuid) -> Result<TransitionOutcome, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let outcome = self
+            .apply_event_locked(&mut tx, order_id, OrderEventType::OrderRefunded, json!({}))
+            .await?;
+        if let TransitionOutcome::Applied(_) = outcome {
+            release_order_items(&mut tx, order_id).await?;
+            sqlx::query("UPDATE tickets SET status = 'void' WHERE order_id = $1")
+                .bind(order_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
     async fn apply_event_locked(
         &self,
         tx: &mut Transaction<'_, Postgres>,

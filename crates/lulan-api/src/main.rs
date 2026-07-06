@@ -93,6 +93,10 @@ async fn main() -> anyhow::Result<()> {
             lulan_api::auth::bootstrap_admin_key(pool, &key).await?;
             tracing::info!("bootstrap admin API key active");
         }
+        if let Ok(spec) = std::env::var("LULAN_BOOTSTRAP_ADMIN_STAFF") {
+            lulan_api::staff::bootstrap_admin_staff(pool, &spec).await?;
+            tracing::info!("bootstrap admin staff active");
+        }
         tokio::spawn(lulan_engine::events::run_relay(
             pool.clone(),
             lulan_engine::webhooks::WebhookSink::new(pool.clone()),

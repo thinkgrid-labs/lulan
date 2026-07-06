@@ -355,6 +355,7 @@ impl InventoryStore {
             JOIN locations ld    ON ld.id = d.location_id AND ld.code = $2
             WHERE o.stop_index < d.stop_index
               AND t.service_date = $3
+              AND t.status = 'scheduled'
             ORDER BY t.departs_at
             "#,
         )

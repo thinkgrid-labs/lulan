@@ -64,7 +64,7 @@ pub async fn create(
     .map_err(|e| ApiError::Internal(e.into()))?;
     audit(
         pool,
-        admin.0.key_id,
+        admin.0,
         "webhook.created",
         serde_json::json!({ "id": id, "url": req.url, "event_types": req.event_types }),
     )
@@ -135,7 +135,7 @@ pub async fn remove(
     }
     audit(
         pool,
-        admin.0.key_id,
+        admin.0,
         "webhook.deactivated",
         serde_json::json!({ "id": id }),
     )

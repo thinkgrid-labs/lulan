@@ -155,7 +155,7 @@ pub async fn create(
     })?;
     audit(
         pool,
-        admin.0.key_id,
+        admin.0,
         "ancillary.created",
         serde_json::json!({ "id": id, "code": req.code.trim(), "price_minor": req.price_minor }),
     )
@@ -199,7 +199,7 @@ pub async fn remove(
     }
     audit(
         pool,
-        admin.0.key_id,
+        admin.0,
         "ancillary.deactivated",
         serde_json::json!({ "id": id }),
     )

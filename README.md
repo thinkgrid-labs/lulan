@@ -1,4 +1,4 @@
-# Lulan — Open-source Headless Reservation Orchestration Platform for Transit
+# Lulan — Open-source Headless Reservation Infrastructure for Modern Transit.
 
 [![CI](https://github.com/thinkgrid-labs/lulan/actions/workflows/ci.yml/badge.svg)](https://github.com/thinkgrid-labs/lulan/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/core-AGPL--3.0-blue.svg)](LICENSE)
@@ -178,7 +178,7 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] Production deploys: Compose (external or bundled databases, auto-TLS) + Helm chart
 - [x] GTFS importer — bring your existing schedule feed
 - [x] Open-loop benchmark mode (published seat-lock latencies vs the <20 ms target)
-- [ ] Admin operations API: staff RBAC (IdP-backed), schedules/fares/refunds, `@lulan/admin-sdk`
+- [x] Admin operations API: staff RBAC (IdP-backed), network & schedule management, fare publishing with rollback, manifests, refunds — with `@lulan/admin-sdk`
 - [ ] Reference Next.js storefront + React Native boarding-crew app
 - [ ] `@lulan/validate` npm package (WASM build of the validator)
 
