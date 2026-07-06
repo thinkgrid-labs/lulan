@@ -56,13 +56,15 @@ Selling a seat means atomically claiming a **span of segments** on a **specific 
 
 ## How it works
 
-A booking flows through five stages, each independently verifiable:
+A booking flows through seven stages — two optional, all independently verifiable:
 
-1. **Search & availability** — `GET /v1/trips/search` returns candidate trips per leg (one-way or round-trip), each with operator, service number, vehicle, schedule, and span-aware seat/pool availability.
-2. **Quote** — `POST /v1/quotes` prices the itinerary (per passenger type, occupancy, peak day, promos) and returns a signed, short-lived quote token.
-3. **Order** — `POST /v1/orders` atomically claims every item for N passengers; any conflict rolls back everything.
-4. **Pay & ticket** — a payment-provider webhook captures payment and auto-issues one Ed25519-signed QR ticket per passenger.
-5. **Board — even offline** — gate devices verify tickets locally against cached public keys (`GET /v1/ticket-keys`), then sync their scan journal (`POST /v1/scans`); the order aggregates to *Boarded* when the last passenger scans in.
+1. **Search & availability** — `GET /v1/trips/search` returns candidate trips per leg (one-way or round-trip), each with operator, service number, vehicle, schedule, and span-aware seat/pool availability. `GET /v1/trips/{id}/availability` drills into the seat map, including which seats other sessions currently hold.
+2. **Hold** *(optional)* — `POST /v1/holds` soft-holds the selected seats across every leg as **one itinerary hold** with a countdown (`expires_at`, operator-configurable). Expired holds auto-release with zero cleanup; buying with an expired hold is a deterministic 409. Holds never gate the sale — claims at order time are the source of truth.
+3. **Add-ons** *(optional)* — `GET /v1/ancillaries` lists everything the operator sells alongside the fare (baggage, meals, insurance, priority boarding), per-passenger or per-order, tied to one leg or the whole itinerary.
+4. **Quote** — `POST /v1/quotes` prices the itinerary + add-ons (per passenger type, occupancy, peak day, round-trip and promo discounts) and returns a signed, short-lived quote token locking the full total.
+5. **Order** — `POST /v1/orders` atomically claims every item on every leg for N passengers; a conflict on *any* leg rolls back everything. One order, one payment — fares and add-ons together.
+6. **Pay & ticket** — a payment-provider webhook captures payment and auto-issues one Ed25519-signed QR ticket per passenger per leg.
+7. **Board — even offline** — gate devices verify tickets locally against cached public keys (`GET /v1/ticket-keys`), then sync their scan journal (`POST /v1/scans`); the order aggregates to *Boarded* when the last passenger scans in.
 
 ## Quick start
 
@@ -108,8 +110,9 @@ just loadgen 10000 0.5     # 10k contenders, 50% via holds — expect 0 double-s
 |---|---|
 | `GET /v1/trips/search` | One-way / round-trip search: candidate trips per leg with schedule + availability |
 | `GET /v1/trips/{id}/availability` | Per-seat / per-pool availability for a journey span |
-| `POST /v1/holds` | Soft-hold a one-way or round-trip seat selection as one itinerary hold |
-| `POST /v1/quotes` | Itemised fare quote + signed quote token |
+| `POST /v1/holds` | Soft-hold a one-way or round-trip seat selection as one itinerary hold (TTL, auto-release) |
+| `GET /v1/ancillaries` | Add-on catalog: baggage, meals, insurance — whatever the operator sells |
+| `POST /v1/quotes` | Itemised quote for fares + add-ons, locked by a signed token |
 | `POST /v1/orders` | Atomic multi-passenger booking (live-priced or quote-token) |
 | `POST /v1/orders/{id}/payment` | Create payment intent (provider port) |
 | `POST /v1/payments/fake/webhook` | Idempotent capture webhook → auto-issues tickets |
@@ -169,6 +172,8 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] OpenAPI spec (served at `/openapi.json`) + TypeScript SDK (`@lulan/storefront-sdk`)
 - [x] Prometheus `/metrics` (OTLP traces planned)
 - [x] Itineraries: one-way, round-trip & multi-city (one atomic order across legs, round-trip fares)
+- [x] Itinerary holds: one hold across all legs, TTL auto-release, live held-seat map
+- [x] Ancillaries: operator add-on catalog (baggage, meals, insurance) priced into quotes & orders
 - [ ] Admin operations API: staff RBAC (IdP-backed), schedules/fares/refunds, `@lulan/admin-sdk`
 - [ ] Reference Next.js storefront + React Native boarding-crew app
 - [ ] `@lulan/validate` npm package (WASM build of the validator)
