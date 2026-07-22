@@ -15,6 +15,10 @@ use sqlx::{PgPool, Row};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// `POST /claims` sells capacity outside the order lifecycle, so it is
+/// gated on an integration-or-admin key. Bootstrapped per run.
+const API_KEY: &str = "llk_test_claims_it_key";
+
 /// Each test gets its own trip (`offset` from the latest) so parallel tests
 /// in this binary never reset each other's fixture. Trips are taken from
 /// the END of the schedule so the availability test's first-trip fixture
@@ -31,6 +35,9 @@ async fn setup(offset: i64) -> Option<(PgPool, Uuid)> {
         .expect("connect to test database");
     lulan_api::MIGRATOR.run(&pool).await.expect("migrations");
     lulan_api::seed::seed(&pool).await.expect("seed");
+    lulan_api::auth::bootstrap_admin_key(&pool, API_KEY)
+        .await
+        .expect("bootstrap key");
 
     let trip_id: Uuid =
         sqlx::query("SELECT t.id FROM trips t JOIN routes r ON r.id = t.route_id WHERE r.code = 'BTG-CEB' ORDER BY t.departs_at DESC LIMIT 1 OFFSET $1")
@@ -59,16 +66,25 @@ async fn setup(offset: i64) -> Option<(PgPool, Uuid)> {
 }
 
 async fn post_json(app: &axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
+    post_json_as(app, uri, body, Some(API_KEY)).await
+}
+
+async fn post_json_as(
+    app: &axum::Router,
+    uri: &str,
+    body: Value,
+    api_key: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    if let Some(key) = api_key {
+        builder = builder.header("x-api-key", key);
+    }
     let response = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header("content-type", "application/json")
-                .body(Body::from(body.to_string()))
-                .unwrap(),
-        )
+        .oneshot(builder.body(Body::from(body.to_string())).unwrap())
         .await
         .unwrap();
     let status = response.status();
@@ -89,6 +105,46 @@ async fn concurrent_claims_never_double_sell() {
         return;
     };
     let app = lulan_api::router(AppState::new(Some(pool.clone()), None).await);
+
+    // A claim is an unreleasable, unexpiring sale of capacity — it must
+    // never be reachable without a credential, and a validator key (a
+    // boarding device) is not enough to sell.
+    let claim_body = json!({"unit_code": "1A", "origin": "BTG", "destination": "CEB"});
+    let (status, _) = post_json_as(
+        &app,
+        &format!("/v1/trips/{trip_id}/claims"),
+        claim_body.clone(),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "anonymous callers must not be able to claim inventory"
+    );
+    let validator_key = "llk_test_claims_it_validator";
+    sqlx::query(
+        "INSERT INTO api_keys (id, key_hash, label, role)
+         VALUES ($1, $2, 'claims_it validator', 'validator')
+         ON CONFLICT (key_hash) DO UPDATE SET active = true",
+    )
+    .bind(Uuid::new_v4())
+    .bind(lulan_api::auth::hash_key(validator_key))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (status, _) = post_json_as(
+        &app,
+        &format!("/v1/trips/{trip_id}/claims"),
+        claim_body,
+        Some(validator_key),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a validator key boards passengers, it does not sell seats"
+    );
 
     // Race 1: 500 contenders, same seat, same full-journey span.
     let mut tasks = tokio::task::JoinSet::new();

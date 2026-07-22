@@ -266,7 +266,7 @@ async fn ancillaries_price_into_quotes_and_orders() {
         "POST",
         &format!("/v1/orders/{order_id}/payment"),
         Some(json!({})),
-        None,
+        Some(ADMIN_KEY),
     )
     .await;
     assert_eq!(payment["order_id"].as_str().unwrap(), order_id);

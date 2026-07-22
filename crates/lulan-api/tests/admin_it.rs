@@ -17,6 +17,10 @@ use uuid::Uuid;
 
 const ISSUER: &str = "https://idp.admin-test";
 const IDP_SECRET: &str = "admin-it-shared-secret";
+/// Machine credential for the storefront/provider paths this flow drives
+/// (payment intent + capture). Sent as `Authorization: Bearer llk_…`,
+/// which both the integration extractor and order access accept.
+const API_KEY: &str = "llk_test_admin_it_key";
 
 fn jwt(subject: &str) -> String {
     jsonwebtoken::encode(
@@ -91,6 +95,9 @@ async fn admin_operations_run_the_business_with_only_idp_tokens() {
     lulan_api::MIGRATOR.run(&pool).await.unwrap();
     lulan_api::seed::seed(&pool).await.unwrap();
     lulan_api::staff::bootstrap_admin_staff(&pool, &format!("{ISSUER}|boss"))
+        .await
+        .unwrap();
+    lulan_api::auth::bootstrap_admin_key(&pool, API_KEY)
         .await
         .unwrap();
 
@@ -383,7 +390,7 @@ async fn admin_operations_run_the_business_with_only_idp_tokens() {
         "POST",
         &format!("/v1/orders/{order_id}/payment"),
         Some(json!({})),
-        None,
+        Some(API_KEY),
     )
     .await;
     let intent = payment["payment_intent_id"].as_str().unwrap();
@@ -392,7 +399,7 @@ async fn admin_operations_run_the_business_with_only_idp_tokens() {
         "POST",
         "/v1/payments/fake/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
-        None,
+        Some(API_KEY),
     )
     .await;
     assert_eq!(hook["order_status"], "ticketed");
@@ -494,7 +501,7 @@ async fn admin_operations_run_the_business_with_only_idp_tokens() {
         "POST",
         &format!("/v1/orders/{order2_id}/payment"),
         Some(json!({})),
-        None,
+        Some(API_KEY),
     )
     .await;
     let intent = payment["payment_intent_id"].as_str().unwrap();
@@ -503,7 +510,7 @@ async fn admin_operations_run_the_business_with_only_idp_tokens() {
         "POST",
         "/v1/payments/fake/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
-        None,
+        Some(API_KEY),
     )
     .await;
 

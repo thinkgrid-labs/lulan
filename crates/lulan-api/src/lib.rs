@@ -5,9 +5,11 @@ pub mod admin;
 pub mod ancillaries;
 pub mod auth;
 pub mod config;
+pub mod cors;
 pub mod error;
 pub mod gtfs;
 pub mod health;
+pub mod idempotency;
 pub mod identity;
 pub mod metrics;
 pub mod orders;
@@ -39,7 +41,7 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 pub const OPENAPI_JSON: &str = include_str!("../openapi.json");
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
         .route("/v1/trips/search", get(trips::search))
@@ -123,9 +125,17 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             rate_limit::limit,
         ))
-        .layer(axum::middleware::from_fn(metrics::record))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .layer(axum::middleware::from_fn(metrics::record));
+
+    // Browser access is opt-in (see `cors`). Applied outside the rate
+    // limiter so a preflight never spends a caller's budget, and only when
+    // configured — an empty CorsLayer would still answer every OPTIONS.
+    let router = match cors::layer_from_env() {
+        Some(cors) => router.layer(cors),
+        None => router,
+    };
+
+    router.layer(TraceLayer::new_for_http()).with_state(state)
 }
 
 #[cfg(test)]

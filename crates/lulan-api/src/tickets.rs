@@ -51,7 +51,7 @@ pub async fn issue(
         .db
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
-    crate::orders::authorize_order_read(&state, &headers, order_id, params.token()).await?;
+    crate::orders::authorize_order_access(&state, &headers, order_id, params.token()).await?;
     let signer = state
         .ticket_signer
         .as_ref()
@@ -82,7 +82,7 @@ pub async fn list(
         .db
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
-    crate::orders::authorize_order_read(&state, &headers, order_id, params.token()).await?;
+    crate::orders::authorize_order_access(&state, &headers, order_id, params.token()).await?;
     let tickets = TicketStore::new(pool.clone())
         .tickets_for_order(order_id)
         .await

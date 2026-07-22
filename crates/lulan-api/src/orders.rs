@@ -23,7 +23,11 @@ use crate::state::AppState;
 const MAX_PASSENGERS: usize = 20;
 
 /// Itinerary shape (`journeys`) or single-trip shape (`trip_id`+`items`).
-#[derive(Deserialize)]
+///
+/// `Serialize` is not for output: it produces the canonical form hashed as
+/// the `Idempotency-Key` request fingerprint, so field order is fixed here
+/// rather than by whatever JSON the client happened to send.
+#[derive(Deserialize, Serialize)]
 pub struct CreateOrderRequest {
     #[serde(default)]
     trip_id: Option<Uuid>,
@@ -55,7 +59,7 @@ pub struct CreateOrderRequest {
     ancillaries: Vec<crate::ancillaries::AncillaryLine>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct OrderJourneyRequest {
     trip_id: Uuid,
     items: Vec<OrderItemRequest>,
@@ -72,7 +76,7 @@ pub struct CreateOrderResponse {
     customer_id: Option<Uuid>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct PassengerRequest {
     full_name: String,
     #[serde(rename = "type")]
@@ -81,7 +85,7 @@ pub struct PassengerRequest {
     birthdate: Option<NaiveDate>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct OrderItemRequest {
     unit_code: String,
     origin: String,
@@ -102,6 +106,11 @@ pub async fn create(
     headers: HeaderMap,
     Json(req): Json<CreateOrderRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    // Fingerprint the request before it is destructured, so a retry under
+    // the same key is checked against what was actually asked for.
+    let idempotency_key = crate::idempotency::key_from_headers(&headers);
+    let request_hash = crate::idempotency::request_hash(&req);
+
     // Normalise both request shapes into journeys of (trip, items).
     let journeys: Vec<(Uuid, Vec<OrderItemRequest>)> = match (req.trip_id, req.items, req.journeys)
     {
@@ -132,27 +141,9 @@ pub async fn create(
     let inventory = state.inventory()?;
     let pool = state.db.as_ref().expect("orders() guaranteed db");
 
-    // Booking retries must not double-book: replay the stored response.
-    let idempotency_key = headers
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    if let Some(key) = &idempotency_key {
-        let stored: Option<(i32, serde_json::Value)> =
-            sqlx::query_as("SELECT status_code, response FROM idempotency_keys WHERE key = $1")
-                .bind(key)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?;
-        if let Some((status, response)) = stored {
-            return Ok((
-                StatusCode::from_u16(status as u16).unwrap_or(StatusCode::OK),
-                Json(response),
-            ));
-        }
-    }
-
     // Identity: a customer bearer token, or guest checkout with contact.
+    // Resolved BEFORE the idempotency key, which is scoped to it — a key
+    // means "this caller's request N", never "request N".
     let customer_id = match crate::identity::bearer_subject(&state, &headers) {
         Some(subject) => Some(
             crate::identity::upsert_customer(pool, &subject)
@@ -166,6 +157,19 @@ pub async fn create(
         return Err(ApiError::BadRequest(
             "guest orders need guest_contact (email or phone) for retrieval".into(),
         ));
+    }
+    let idempotency_scope = crate::idempotency::scope(customer_id, guest_contact);
+
+    // A plain retry of a finished booking answers here, before pricing.
+    if let Some((status, response)) = crate::idempotency::replay_if_completed(
+        pool,
+        idempotency_key.as_deref(),
+        &idempotency_scope,
+        &request_hash,
+    )
+    .await?
+    {
+        return Ok((status, Json(response)));
     }
 
     let mut passengers = Vec::with_capacity(req.passengers.len());
@@ -253,6 +257,12 @@ pub async fn create(
     );
 
     let mut quote_ancillaries: Option<Vec<crate::quotes::QuoteTokenAncillary>> = None;
+    // The unit the order is denominated in: whatever priced it. A quote
+    // token carries the currency it locked; live pricing reports the active
+    // ruleset's. Never assumed — an operator selling in anything but the
+    // engine's old hard-coded PHP used to get a quote in their currency and
+    // an order row in pesos.
+    let currency: String;
     let items: Vec<NewOrderItem> = match &req.quote_token {
         Some(token) => {
             // Honour quoted prices — untampered, unexpired, covering every
@@ -260,6 +270,7 @@ pub async fn create(
             let quote = crate::quotes::verify(&state.quote_secret, token)
                 .ok_or_else(|| ApiError::BadRequest("invalid or expired quote token".into()))?;
             quote_ancillaries = Some(quote.ancillaries);
+            currency = quote.currency;
             let mut items = Vec::with_capacity(flat.len());
             for (trip_id, item) in &flat {
                 let quantity = item.quantity.unwrap_or(1);
@@ -315,8 +326,19 @@ pub async fn create(
                     passenger_type: seat_passenger_type(i),
                 })
                 .collect();
-            crate::pricing::price_items(&state, &priceable, req.promo_code.as_deref(), context)
-                .await?
+            let priced =
+                crate::pricing::price_items(&state, &priceable, req.promo_code.as_deref(), context)
+                    .await?;
+            // One active ruleset prices the whole itinerary, so every line
+            // shares its currency; assert rather than silently pick one.
+            currency = priced[0].quote.currency.clone();
+            if let Some(odd) = priced.iter().find(|p| p.quote.currency != currency) {
+                return Err(ApiError::Internal(anyhow::anyhow!(
+                    "fare rules priced one itinerary in two currencies ({currency} and {})",
+                    odd.quote.currency
+                )));
+            }
+            priced
                 .into_iter()
                 .zip(&flat)
                 .map(|(p, (_, i))| NewOrderItem {
@@ -382,63 +404,83 @@ pub async fn create(
             .collect(),
     };
 
-    match orders.create(&passengers, &items, &ancillary_lines).await? {
-        CreateOutcome::Created(record) => {
-            // Attach ownership/contact (created in the same request, so
-            // visible before the response ever leaves).
-            sqlx::query("UPDATE orders SET customer_id = $2, guest_contact = $3 WHERE id = $1")
-                .bind(record.order_id)
-                .bind(customer_id)
-                .bind(guest_contact)
-                .execute(pool)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?;
-
-            // The itinerary hold has served its purpose; best-effort release.
-            if let (Some(hold_id), Ok(holds)) = (req.hold_id, state.holds()) {
-                let _ = holds.release_itinerary(hold_id).await;
+    // Claim the idempotency key immediately before the write: everything
+    // from here to complete/release is the window a concurrent retry sees
+    // as in-flight, so it stays as short as possible.
+    let reservation =
+        match crate::idempotency::reserve(pool, idempotency_key, idempotency_scope, &request_hash)
+            .await?
+        {
+            crate::idempotency::Reserved::Replay(status, response) => {
+                return Ok((status, Json(response)));
             }
+            crate::idempotency::Reserved::Held(reservation) => Some(reservation),
+            crate::idempotency::Reserved::Disabled => None,
+        };
 
-            let response = CreateOrderResponse {
-                retrieval_token: crate::identity::retrieval_token(
-                    &state.quote_secret,
-                    record.order_id,
-                ),
-                customer_id,
-                record,
-            };
-            let body = serde_json::to_value(&response).map_err(|e| ApiError::Internal(e.into()))?;
-            if let Some(key) = &idempotency_key {
-                sqlx::query(
-                    "INSERT INTO idempotency_keys (key, order_id, status_code, response)
-                     VALUES ($1, $2, 201, $3) ON CONFLICT (key) DO NOTHING",
-                )
-                .bind(key)
-                .bind(response.record.order_id)
-                .bind(&body)
-                .execute(pool)
-                .await
-                .map_err(|e| ApiError::Internal(e.into()))?;
+    let outcome = orders
+        .create(lulan_engine::orders::NewOrder {
+            passengers: &passengers,
+            items: &items,
+            ancillaries: &ancillary_lines,
+            currency: &currency,
+            customer_id,
+            guest_contact,
+        })
+        .await;
+
+    // Nothing was booked on any failing path — give the key back so the
+    // caller can retry with it (after choosing another seat, say).
+    let record = match outcome {
+        Ok(CreateOutcome::Created(record)) => record,
+        other => {
+            if let Some(reservation) = &reservation {
+                crate::idempotency::release(pool, reservation).await;
             }
-            Ok((StatusCode::CREATED, Json(body)))
+            return Err(match other {
+                Err(err) => err.into(),
+                Ok(CreateOutcome::Conflict { unit_code }) => ApiError::Conflict(format!(
+                    "{unit_code} is no longer available for the requested span"
+                )),
+                Ok(CreateOutcome::NotFound { what }) => {
+                    ApiError::NotFound(format!("{what} not found"))
+                }
+                Ok(CreateOutcome::Invalid(validation)) => ApiError::BadRequest(match validation {
+                    ItemValidation::SeatNeedsPassenger { unit_code } => {
+                        format!("seat {unit_code} needs a passenger index")
+                    }
+                    ItemValidation::PassengerIndexOutOfRange { unit_code, index } => {
+                        format!(
+                            "seat {unit_code} references passenger {index}, which does not exist"
+                        )
+                    }
+                    ItemValidation::PoolWithPassenger { unit_code } => {
+                        format!("pool item {unit_code} cannot reference a passenger")
+                    }
+                    ItemValidation::NoPassengers => "orders need at least one passenger".into(),
+                }),
+                Ok(CreateOutcome::Created(_)) => unreachable!("matched above"),
+            });
         }
-        CreateOutcome::Conflict { unit_code } => Err(ApiError::Conflict(format!(
-            "{unit_code} is no longer available for the requested span"
-        ))),
-        CreateOutcome::NotFound { what } => Err(ApiError::NotFound(format!("{what} not found"))),
-        CreateOutcome::Invalid(validation) => Err(ApiError::BadRequest(match validation {
-            ItemValidation::SeatNeedsPassenger { unit_code } => {
-                format!("seat {unit_code} needs a passenger index")
-            }
-            ItemValidation::PassengerIndexOutOfRange { unit_code, index } => {
-                format!("seat {unit_code} references passenger {index}, which does not exist")
-            }
-            ItemValidation::PoolWithPassenger { unit_code } => {
-                format!("pool item {unit_code} cannot reference a passenger")
-            }
-            ItemValidation::NoPassengers => "orders need at least one passenger".into(),
-        })),
+    };
+
+    // The itinerary hold has served its purpose; best-effort release.
+    if let (Some(hold_id), Ok(holds)) = (req.hold_id, state.holds()) {
+        let _ = holds.release_itinerary(hold_id).await;
     }
+
+    let order_id = record.order_id;
+    let response = CreateOrderResponse {
+        retrieval_token: crate::identity::retrieval_token(&state.quote_secret, order_id),
+        customer_id,
+        record,
+    };
+    let body = serde_json::to_value(&response).map_err(|e| ApiError::Internal(e.into()))?;
+    if let Some(reservation) = &reservation {
+        crate::idempotency::complete(pool, reservation, order_id, StatusCode::CREATED, &body)
+            .await?;
+    }
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 #[derive(Serialize)]
@@ -461,9 +503,11 @@ impl GetOrderParams {
     }
 }
 
-/// Order reads are gated: retrieval token, owning customer, or an API
-/// key. Public order enumeration was fine for a demo, not for PII.
-pub(crate) async fn authorize_order_read(
+/// Access to one order — reading it, paying it, cancelling it — is gated
+/// on one of: its retrieval token, the owning customer's bearer token, or
+/// an API key. Knowing the order id is not a credential: it appears in
+/// logs, URLs, and confirmation emails.
+pub(crate) async fn authorize_order_access(
     state: &AppState,
     headers: &HeaderMap,
     order_id: Uuid,
@@ -528,7 +572,7 @@ pub async fn get(
     headers: HeaderMap,
 ) -> Result<Json<OrderDetails>, ApiError> {
     let orders = state.orders()?;
-    authorize_order_read(&state, &headers, order_id, params.token.as_deref()).await?;
+    authorize_order_access(&state, &headers, order_id, params.token.as_deref()).await?;
     let record = orders
         .get(order_id)
         .await?
@@ -554,12 +598,17 @@ pub struct PaymentResponse {
 }
 
 /// POST /v1/orders/{order_id}/payment — Locked → PendingPayment via the
-/// configured provider (FakeProvider until a real adapter lands).
+/// configured provider (FakeProvider until a real adapter lands). Gated
+/// like the order itself: the intent id it returns is what captures the
+/// payment, so it must not be mintable by anyone holding the order id.
 pub async fn request_payment(
     State(state): State<AppState>,
     Path(order_id): Path<Uuid>,
+    Query(params): Query<GetOrderParams>,
+    headers: HeaderMap,
 ) -> Result<Json<PaymentResponse>, ApiError> {
     let orders = state.orders()?;
+    authorize_order_access(&state, &headers, order_id, params.token()).await?;
     let record = orders
         .get(order_id)
         .await?
@@ -605,8 +654,15 @@ pub struct WebhookResponse {
 /// POST /v1/payments/fake/webhook — the FakeProvider's async notification.
 /// A successful capture auto-issues tickets (best-effort: the order stays
 /// Paid and re-issuable if ticketing hiccups).
+///
+/// Requires an `integration` or `operator_admin` key. This endpoint turns
+/// an order into a boarding pass, so it needs the same trust as the
+/// counter-payment path it stands in for: a real provider authenticates
+/// with a signed callback, and until such an adapter exists that trust is
+/// carried by the API key. Anonymous access here is free travel.
 pub async fn fake_webhook(
     State(state): State<AppState>,
+    _auth: crate::auth::IntegrationAuth,
     Json(req): Json<FakeWebhookRequest>,
 ) -> Result<Json<WebhookResponse>, ApiError> {
     let succeeded = match req.status.as_str() {
@@ -664,11 +720,16 @@ pub struct CancelResponse {
 }
 
 /// POST /v1/orders/{order_id}/cancel — releases claims atomically.
+/// Gated like the order itself: cancelling destroys a booking and frees
+/// its seats, so the order id alone must not authorise it.
 pub async fn cancel(
     State(state): State<AppState>,
     Path(order_id): Path<Uuid>,
+    Query(params): Query<GetOrderParams>,
+    headers: HeaderMap,
 ) -> Result<Json<CancelResponse>, ApiError> {
     let orders = state.orders()?;
+    authorize_order_access(&state, &headers, order_id, params.token()).await?;
     match orders.cancel(order_id).await? {
         TransitionOutcome::Applied(status) => Ok(Json(CancelResponse { order_id, status })),
         TransitionOutcome::NoOp(current) => Err(ApiError::Conflict(format!(

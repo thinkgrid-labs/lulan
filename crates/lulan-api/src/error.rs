@@ -48,6 +48,11 @@ impl From<StoreError> for ApiError {
                 ApiError::BadRequest(err.to_string())
             }
             StoreError::Span(_) => ApiError::BadRequest(err.to_string()),
+            // The request was well formed; the departure just isn't for
+            // sale any more — the same shape as losing a seat race.
+            StoreError::TripNotSellable { .. } | StoreError::TripDeparted { .. } => {
+                ApiError::Conflict(err.to_string())
+            }
             StoreError::Db(db) => ApiError::Internal(db.into()),
         }
     }

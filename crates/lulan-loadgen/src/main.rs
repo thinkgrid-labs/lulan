@@ -15,6 +15,9 @@
 //! - `DATABASE_URL`   (required) — pick the target trip, reset occupancy,
 //!   verify the invariant afterwards.
 //! - `LULAN_URL`      (default `http://127.0.0.1:8080`)
+//! - `LULAN_API_KEY`  (optional) — `POST /claims` is integration-gated; the
+//!   harness provisions its own key in the target database unless this
+//!   names an existing one.
 //! - `MODE`           (`burst` | `paced`, default `burst`)
 //! - `CONTENDERS`     (burst; default `10000`)
 //! - `RATE`           (paced; arrivals/second, default `200`)
@@ -220,10 +223,30 @@ async fn main() -> anyhow::Result<ExitCode> {
         })
         .collect();
 
+    // `POST /claims` is integration-gated, so the harness provisions its
+    // own key through the same database it already resets fixtures in
+    // (sha256() and gen_random_uuid() are core Postgres — no extra deps).
+    // Set LULAN_API_KEY to reuse an existing one instead.
+    let api_key =
+        std::env::var("LULAN_API_KEY").unwrap_or_else(|_| "llk_loadgen_harness_key".to_string());
+    sqlx::query(
+        "INSERT INTO api_keys (id, key_hash, label, role)
+         VALUES (gen_random_uuid(), sha256($1::bytea), 'loadgen', 'integration')
+         ON CONFLICT (key_hash) DO UPDATE SET active = true",
+    )
+    .bind(api_key.as_bytes())
+    .execute(&pool)
+    .await
+    .context("provision the loadgen API key")?;
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("x-api-key", api_key.parse()?);
+
     // HTTP/2 prior knowledge: thousands of contenders multiplex over a few
     // TCP connections instead of a 10k-SYN storm that overflows the OS
     // listen backlog — the same shape real SDK clients produce.
     let client = reqwest::Client::builder()
+        .default_headers(headers)
         .http2_prior_knowledge()
         .pool_max_idle_per_host(64)
         .timeout(std::time::Duration::from_secs(60))

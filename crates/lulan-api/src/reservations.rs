@@ -224,8 +224,15 @@ pub struct ClaimResponse {
 }
 
 /// POST /v1/trips/{trip_id}/claims
+///
+/// Requires an `integration` or `operator_admin` key. A claim here sells
+/// capacity outside the order lifecycle: it has no expiry, no payment, and
+/// no release endpoint, so it must never be reachable anonymously. Public
+/// booking goes through `POST /v1/orders`, whose claims are provisional
+/// and swept on expiry.
 pub async fn create_claim(
     State(state): State<AppState>,
+    _auth: crate::auth::IntegrationAuth,
     Path(trip_id): Path<Uuid>,
     Json(req): Json<ClaimRequest>,
 ) -> Result<(StatusCode, Json<ClaimResponse>), ApiError> {

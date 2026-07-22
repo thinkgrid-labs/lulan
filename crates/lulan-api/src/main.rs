@@ -117,6 +117,13 @@ async fn main() -> anyhow::Result<()> {
                     Ok(n) => tracing::info!(expired = n, "expired overdue orders"),
                     Err(err) => tracing::error!(error = %err, "order expiry sweep failed"),
                 }
+                // Reclaims keys whose booking died mid-flight, and expires
+                // stored responses past any sane retry window.
+                match sweeper_store.sweep_idempotency_keys().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::debug!(removed = n, "swept idempotency keys"),
+                    Err(err) => tracing::error!(error = %err, "idempotency sweep failed"),
+                }
             }
         });
     }

@@ -18,13 +18,29 @@ use sqlx::{PgPool, Row};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// Server-to-server credential for the provider capture callback.
+const API_KEY: &str = "llk_test_itinerary_it_key";
+
 async fn call(
     app: &axum::Router,
     method: &str,
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    call_keyed(app, method, uri, body, None).await
+}
+
+async fn call_keyed(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    api_key: Option<&str>,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(key) = api_key {
+        builder = builder.header("x-api-key", key);
+    }
     let body = match body {
         Some(v) => {
             builder = builder.header("content-type", "application/json");
@@ -88,6 +104,9 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
         .unwrap();
     lulan_api::MIGRATOR.run(&pool).await.unwrap();
     lulan_api::seed::seed(&pool).await.unwrap();
+    lulan_api::auth::bootstrap_admin_key(&pool, API_KEY)
+        .await
+        .unwrap();
 
     let outbound = route_trips(&pool, "BTG-CEB").await;
     let returns = route_trips(&pool, "CEB-BTG").await;
@@ -283,16 +302,17 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
     let (_, payment) = call(
         &app,
         "POST",
-        &format!("/v1/orders/{order_id}/payment"),
+        &format!("/v1/orders/{order_id}/payment?token={retrieval}"),
         Some(json!({})),
     )
     .await;
     let intent = payment["payment_intent_id"].as_str().unwrap();
-    let (_, hook) = call(
+    let (_, hook) = call_keyed(
         &app,
         "POST",
         "/v1/payments/fake/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
+        Some(API_KEY),
     )
     .await;
     assert_eq!(hook["order_status"], "ticketed");

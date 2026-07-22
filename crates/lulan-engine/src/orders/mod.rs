@@ -19,9 +19,11 @@ use crate::inventory::{
     release_seat_exec,
 };
 
-pub const CURRENCY: &str = "PHP";
 /// How long claims stay provisional awaiting payment.
 pub const ORDER_TTL_MINUTES: i64 = 15;
+/// How long a stored `Idempotency-Key` response stays replayable. Past
+/// this, the same key is treated as a new booking rather than a retry.
+pub const IDEMPOTENCY_RETENTION_HOURS: i64 = 24;
 
 #[derive(Debug, Clone)]
 pub struct NewPassenger {
@@ -121,6 +123,28 @@ pub enum ItemValidation {
     NoPassengers,
 }
 
+/// Everything one booking needs, so the order row, its passengers, its
+/// claims, its events AND its ownership all land in one transaction.
+///
+/// Ownership belongs here rather than in a follow-up UPDATE: an order
+/// written without it is unreachable by the customer who paid for it and
+/// has no contact for payment reconciliation. A crash between the two
+/// statements used to produce exactly that.
+#[derive(Debug)]
+pub struct NewOrder<'a> {
+    pub passengers: &'a [NewPassenger],
+    pub items: &'a [NewOrderItem],
+    pub ancillaries: &'a [NewOrderAncillary],
+    /// ISO 4217 code from the ruleset (or quote token) that priced the
+    /// items — the engine records money, it never decides the unit.
+    pub currency: &'a str,
+    /// The authenticated customer, when there is one.
+    pub customer_id: Option<Uuid>,
+    /// Guest checkout contact; how a booking without a customer is
+    /// retrieved and reconciled.
+    pub guest_contact: Option<&'a str>,
+}
+
 /// Result of creating an order.
 #[derive(Debug)]
 pub enum CreateOutcome {
@@ -164,12 +188,16 @@ impl OrderStore {
     /// trips): passengers + claims + order row + OrderCreated/
     /// InventoryLocked events, atomically. A claim conflict on ANY leg
     /// rolls back every claim on every leg.
-    pub async fn create(
-        &self,
-        passengers: &[NewPassenger],
-        items: &[NewOrderItem],
-        ancillaries: &[NewOrderAncillary],
-    ) -> Result<CreateOutcome, StoreError> {
+    ///
+    pub async fn create(&self, order: NewOrder<'_>) -> Result<CreateOutcome, StoreError> {
+        let NewOrder {
+            passengers,
+            items,
+            ancillaries,
+            currency,
+            customer_id,
+            guest_contact,
+        } = order;
         if passengers.is_empty() {
             return Ok(CreateOutcome::Invalid(ItemValidation::NoPassengers));
         }
@@ -256,15 +284,19 @@ impl OrderStore {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query(
-            "INSERT INTO orders (id, passenger_name, status, total_minor, currency, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO orders
+                 (id, passenger_name, status, total_minor, currency, expires_at,
+                  customer_id, guest_contact)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(order_id)
         .bind(&passengers[0].full_name)
         .bind(OrderStatus::Locked.as_str())
         .bind(total_minor)
-        .bind(CURRENCY)
+        .bind(currency)
         .bind(expires_at)
+        .bind(customer_id)
+        .bind(guest_contact)
         .execute(&mut *tx)
         .await?;
 
@@ -417,7 +449,7 @@ impl OrderStore {
                 "trip_ids": distinct_trips(&recorded_items),
                 "passengers": passengers_json,
                 "total_minor": total_minor,
-                "currency": CURRENCY,
+                "currency": currency,
                 "items": items_json,
                 "ancillaries": ancillaries_json,
             }),
@@ -439,7 +471,7 @@ impl OrderStore {
             passenger_name: passenger_records[0].full_name.clone(),
             status: OrderStatus::Locked,
             total_minor,
-            currency: CURRENCY.to_string(),
+            currency: currency.to_string(),
             payment_intent_id: None,
             expires_at: Some(expires_at),
             passengers: passenger_records,
@@ -568,6 +600,31 @@ impl OrderStore {
             tx.commit().await?;
         }
         Ok(expired)
+    }
+
+    /// Drop idempotency records the booking flow no longer needs, so the
+    /// dedup cache cannot grow without bound. Two ages, deliberately
+    /// different:
+    ///
+    /// - `pending` reservations older than the order TTL are abandoned —
+    ///   a crash between reserving a key and storing its response would
+    ///   otherwise block that key forever.
+    /// - `completed` responses outlive any sane retry window; after that
+    ///   a repeat is a new booking, not a retry.
+    ///
+    /// Returns rows removed.
+    pub async fn sweep_idempotency_keys(&self) -> Result<u64, StoreError> {
+        let removed = sqlx::query(
+            "DELETE FROM idempotency_keys
+             WHERE (status = 'pending'   AND created_at < now() - make_interval(mins => $1))
+                OR (status = 'completed' AND created_at < now() - make_interval(hours => $2))",
+        )
+        .bind(ORDER_TTL_MINUTES as f64)
+        .bind(IDEMPOTENCY_RETENTION_HOURS as f64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(removed)
     }
 
     /// One lifecycle step under the order row lock: check legality via the

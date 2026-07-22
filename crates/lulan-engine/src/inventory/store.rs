@@ -15,6 +15,13 @@ pub enum StoreError {
     UnknownStop(String),
     #[error("{origin:?} does not precede {destination:?} on this trip's route")]
     StopsOutOfOrder { origin: String, destination: String },
+    #[error("this trip is {status} and no longer open for sale")]
+    TripNotSellable { status: String },
+    #[error("this trip left {origin} at {departed_at} and can no longer be booked")]
+    TripDeparted {
+        origin: String,
+        departed_at: DateTime<Utc>,
+    },
     #[error("invalid segment span: {0}")]
     Span(#[from] SpanError),
     #[error(transparent)]
@@ -147,6 +154,12 @@ impl InventoryStore {
 
     /// Resolve (trip, unit code, origin, destination) to a claimable target.
     /// `Ok(None)` if the trip doesn't exist or the unit isn't on its vessel.
+    ///
+    /// This is the one gate every sale passes through — holds, claims,
+    /// quotes and orders all resolve here — so it is also where a trip
+    /// stops being sellable. Search already hides cancelled and past
+    /// departures, but a trip id is enough to bypass search, and selling a
+    /// seat on a departure that has left is worse than a 404.
     pub async fn resolve_target(
         &self,
         trip_id: Uuid,
@@ -156,7 +169,8 @@ impl InventoryStore {
     ) -> Result<Option<ClaimTarget>, StoreError> {
         let Some(row) = sqlx::query(
             r#"
-            SELECT cu.id AS unit_id, cu.kind, cu.fare_class, t.route_id
+            SELECT cu.id AS unit_id, cu.kind, cu.fare_class,
+                   t.route_id, t.departs_at, t.status
             FROM trips t
             JOIN capacity_units cu
               ON cu.resource_id = t.resource_id AND cu.code = $2
@@ -171,8 +185,25 @@ impl InventoryStore {
             return Ok(None);
         };
 
+        let status: String = row.try_get("status")?;
+        if status != "scheduled" {
+            return Err(StoreError::TripNotSellable { status });
+        }
+
         let route_id: Uuid = row.try_get("route_id")?;
-        let span = self.resolve_span(route_id, origin, destination).await?;
+        let (span, depart_offset) = self.resolve_span(route_id, origin, destination).await?;
+
+        // Judged at the requested ORIGIN, not the route's first stop: a
+        // trip mid-journey can still sell its later legs.
+        let departs_at: DateTime<Utc> = row.try_get("departs_at")?;
+        let boards_at = departs_at + chrono::Duration::minutes(i64::from(depart_offset));
+        if boards_at <= Utc::now() {
+            return Err(StoreError::TripDeparted {
+                origin: origin.to_string(),
+                departed_at: boards_at,
+            });
+        }
+
         Ok(Some(ClaimTarget {
             unit_id: row.try_get("unit_id")?,
             kind: row.try_get("kind")?,
@@ -438,7 +469,10 @@ impl InventoryStore {
         };
         let route_id: Uuid = trip.try_get("route_id")?;
 
-        let span = self.resolve_span(route_id, origin, destination).await?;
+        // Availability is a read: a departed or cancelled trip still answers
+        // (crew and support look at them). Selling is gated in
+        // `resolve_target`.
+        let (span, _) = self.resolve_span(route_id, origin, destination).await?;
 
         let seat_rows = sqlx::query(
             r#"
@@ -479,16 +513,19 @@ impl InventoryStore {
         }))
     }
 
-    /// Map origin/destination codes to a segment span on `route_id`.
+    /// Map origin/destination codes to a segment span on `route_id`, plus
+    /// the origin stop's departure offset in minutes from the trip's own
+    /// departure — what turns a trip time into a boarding time for this
+    /// particular leg.
     async fn resolve_span(
         &self,
         route_id: Uuid,
         origin: &str,
         destination: &str,
-    ) -> Result<SegmentSpan, StoreError> {
+    ) -> Result<(SegmentSpan, i32), StoreError> {
         let rows = sqlx::query(
             r#"
-            SELECT l.code, rs.stop_index
+            SELECT l.code, rs.stop_index, rs.depart_offset_min
             FROM route_stops rs
             JOIN locations l ON l.id = rs.location_id
             WHERE rs.route_id = $1 AND l.code IN ($2, $3)
@@ -500,21 +537,26 @@ impl InventoryStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let index_of = |code: &str| -> Result<i16, StoreError> {
+        let stop_of = |code: &str| -> Result<(i16, i32), StoreError> {
             rows.iter()
                 .find(|r| r.get::<String, _>("code") == code)
-                .map(|r| r.get::<i16, _>("stop_index"))
+                .map(|r| {
+                    (
+                        r.get::<i16, _>("stop_index"),
+                        r.get::<i32, _>("depart_offset_min"),
+                    )
+                })
                 .ok_or_else(|| StoreError::UnknownStop(code.to_string()))
         };
-        let from = index_of(origin)?;
-        let to = index_of(destination)?;
+        let (from, depart_offset) = stop_of(origin)?;
+        let (to, _) = stop_of(destination)?;
         if from >= to {
             return Err(StoreError::StopsOutOfOrder {
                 origin: origin.to_string(),
                 destination: destination.to_string(),
             });
         }
-        Ok(SegmentSpan::new(from as u8, to as u8)?)
+        Ok((SegmentSpan::new(from as u8, to as u8)?, depart_offset))
     }
 
     async fn fare_availability(

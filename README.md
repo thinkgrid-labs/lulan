@@ -94,10 +94,17 @@ curl -X POST localhost:8080/v1/quotes -H 'content-type: application/json' -d '{
     {"unit_code": "12D", "origin": "BTG", "destination": "CEB", "passenger_type": "child"}
   ]}'
 
-# 3. Order with the quote token, pay (fake provider), fetch signed QR tickets
+# 3. Order with the quote token, pay (fake provider), fetch signed QR tickets.
+#    Everything scoped to one order — paying it, cancelling it, reading its
+#    tickets — needs that order's retrieval_token (returned at creation),
+#    the owning customer's JWT, or an API key. The order id is not a
+#    credential. Capture is server-to-server: integration key required.
 curl -X POST localhost:8080/v1/orders ...
-curl -X POST localhost:8080/v1/orders/<id>/payment
-curl localhost:8080/v1/orders/<id>/tickets
+curl -X POST "localhost:8080/v1/orders/<id>/payment?token=<retrieval_token>"
+curl -X POST localhost:8080/v1/payments/fake/webhook \
+  -H "x-api-key: $LULAN_BOOTSTRAP_ADMIN_KEY" -H 'content-type: application/json' \
+  -d '{"payment_intent_id": "<intent>", "status": "succeeded"}'
+curl "localhost:8080/v1/orders/<id>/tickets?token=<retrieval_token>"
 ```
 
 Run the test suite and the concurrency harness:
@@ -118,8 +125,9 @@ just loadgen-paced 200 30  # open-loop 200 req/s — honest seat-lock latencies
 | `GET /v1/ancillaries` | Add-on catalog: baggage, meals, insurance — whatever the operator sells |
 | `POST /v1/quotes` | Itemised quote for fares + add-ons, locked by a signed token |
 | `POST /v1/orders` | Atomic multi-passenger booking (live-priced or quote-token) |
-| `POST /v1/orders/{id}/payment` | Create payment intent (provider port) |
-| `POST /v1/payments/fake/webhook` | Idempotent capture webhook → auto-issues tickets |
+| `POST /v1/orders/{id}/payment` | Create payment intent (provider port) — order credential required |
+| `POST /v1/orders/{id}/cancel` | Cancel and release claims — order credential required |
+| `POST /v1/payments/fake/webhook` | Idempotent capture webhook → auto-issues tickets (integration key) |
 | `GET /v1/orders/{id}/tickets` | Ed25519-signed QR ticket tokens |
 | `GET /v1/ticket-keys` | Public keys for offline validators |
 | `POST /v1/scans` | Batched, idempotent boarding-scan sync (validator key) |
@@ -128,6 +136,19 @@ just loadgen-paced 200 30  # open-loop 200 req/s — honest seat-lock latencies
 | `GET /metrics` | Prometheus metrics |
 
 The full surface is documented in the OpenAPI spec — committed at [`crates/lulan-api/openapi.json`](crates/lulan-api/openapi.json) and served live at `GET /openapi.json`. A typed TypeScript client ships as [`@lulan/storefront-sdk`](packages/storefront-sdk).
+
+**Calling from a browser.** Lulan sends no CORS headers by default, so a
+web storefront must either call through its own backend or have its origin
+named in `LULAN_CORS_ALLOWED_ORIGINS` (comma-separated, or `*`). The API
+returns passenger data and boarding-pass tokens; which sites may read
+those is an operator decision, not a default.
+
+**Selling stops when the departure does.** A trip id bypasses search, so
+"still for sale?" is enforced where inventory resolves, not where it is
+listed: quotes, holds, claims and orders all 409 once the trip has left
+the requested origin (judged per leg — a service mid-journey can still
+sell its later legs) or once ops has cancelled it. Availability stays
+readable either way; crew and support still need to see past departures.
 
 ## Bring your own providers
 
@@ -185,7 +206,16 @@ adapter-sized work, not engine work:
 
 Payment capture is idempotent (duplicate and out-of-order webhooks are
 acknowledged, never re-applied), and `Idempotency-Key` on order creation
-makes client retries double-booking-proof end to end.
+makes client retries double-booking-proof end to end: the key is claimed
+*before* the order is written, so two concurrent retries cannot both book.
+Keys are scoped to the caller and bound to the request body — one client's
+key never replays another's order, and reusing a key for a different
+request is refused rather than answered with an unrelated booking.
+
+Money is recorded in the currency the fare ruleset priced it in, per
+order. Lulan does not convert between currencies (multi-currency
+settlement is out of scope for v1); an operator selling in several
+publishes a ruleset per currency.
 
 ## Architecture
 

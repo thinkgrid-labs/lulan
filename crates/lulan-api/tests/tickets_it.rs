@@ -18,6 +18,9 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 const DEVICE_KEY: &str = "llk_test_validator_key_tickets_it";
+/// Server-to-server credential for the provider capture callback — a
+/// validator key boards passengers, it cannot capture payment.
+const INTEGRATION_KEY: &str = "llk_test_integration_key_tickets_it";
 
 async fn call(
     app: &axum::Router,
@@ -105,6 +108,9 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     .execute(&pool)
     .await
     .unwrap();
+    lulan_api::auth::bootstrap_admin_key(&pool, INTEGRATION_KEY)
+        .await
+        .unwrap();
 
     let app = lulan_api::router(AppState::new(Some(pool.clone()), None).await);
 
@@ -148,16 +154,28 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     let (_, payment) = call(
         &app,
         "POST",
-        &format!("/v1/orders/{order_id}/payment"),
+        &format!("/v1/orders/{order_id}/payment?token={retrieval}"),
         Some(json!({})),
     )
     .await;
     let intent = payment["payment_intent_id"].as_str().unwrap();
-    let (_, hook) = call(
+    // A boarding device must not be able to capture payment: scanning
+    // tickets and selling them are different powers.
+    let (status, _) = call_with_key(
         &app,
         "POST",
         "/v1/payments/fake/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
+        Some(DEVICE_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, hook) = call_with_key(
+        &app,
+        "POST",
+        "/v1/payments/fake/webhook",
+        Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
+        Some(INTEGRATION_KEY),
     )
     .await;
     assert_eq!(hook["order_status"], "ticketed");

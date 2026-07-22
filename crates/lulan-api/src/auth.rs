@@ -2,7 +2,8 @@
 //! three roles, enforced at the extractor layer:
 //!
 //! - `operator_admin` — manage webhooks and API keys (audited)
-//! - `integration`    — trusted storefront backends (read any order)
+//! - `integration`    — trusted storefront backends and payment/agent
+//!   callbacks: read any order, claim capacity directly, capture payment
 //! - `validator`      — ticket-validation devices — gates, crew handhelds (sync scans)
 //!
 //! Keys look like `llk_<64 hex chars>`; only their SHA-256 is stored.
@@ -159,6 +160,27 @@ impl FromRequestParts<AppState> for AdminAuth {
             Some(_) => Err(ApiError::Forbidden("admin role required")),
             None => Err(ApiError::Forbidden("not enrolled as staff")),
         }
+    }
+}
+
+/// Extractor for trusted server-to-server callers: `integration` or
+/// `operator_admin`. This is the credential a storefront backend, an
+/// agent network, or a payment provider's callback uses — anything that
+/// moves inventory or money without a customer-scoped credential.
+pub struct IntegrationAuth(pub ApiKeyAuth);
+
+impl FromRequestParts<AppState> for IntegrationAuth {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let auth = ApiKeyAuth::from_request_parts(parts, state).await?;
+        if !matches!(auth.role, ApiRole::Integration | ApiRole::OperatorAdmin) {
+            return Err(ApiError::Forbidden("integration role required"));
+        }
+        Ok(IntegrationAuth(auth))
     }
 }
 

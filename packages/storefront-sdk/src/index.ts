@@ -478,12 +478,20 @@ export class LulanClient {
     return this.request("GET", `/v1/orders/${orderId}${query}`, undefined, options);
   }
 
-  requestPayment(orderId: string, options?: RequestOptions): Promise<PaymentResponse> {
-    return this.request("POST", `/v1/orders/${orderId}/payment`, {}, options);
+  /**
+   * Needs a credential, like every other order operation: the retrieval
+   * token, a customer JWT, or an API key. The intent id this returns is
+   * what captures the payment.
+   */
+  requestPayment(orderId: string, retrievalToken?: string, options?: RequestOptions): Promise<PaymentResponse> {
+    const query = retrievalToken ? `?token=${encodeURIComponent(retrievalToken)}` : "";
+    return this.request("POST", `/v1/orders/${orderId}/payment${query}`, {}, options);
   }
 
-  cancelOrder(orderId: string, options?: RequestOptions): Promise<{ order_id: string; status: OrderStatus }> {
-    return this.request("POST", `/v1/orders/${orderId}/cancel`, {}, options);
+  /** Needs a credential: the retrieval token, a customer JWT, or an API key. */
+  cancelOrder(orderId: string, retrievalToken?: string, options?: RequestOptions): Promise<{ order_id: string; status: OrderStatus }> {
+    const query = retrievalToken ? `?token=${encodeURIComponent(retrievalToken)}` : "";
+    return this.request("POST", `/v1/orders/${orderId}/cancel${query}`, {}, options);
   }
 
   // ---- customers -------------------------------------------------------

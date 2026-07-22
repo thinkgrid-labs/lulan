@@ -15,6 +15,10 @@ use sqlx::{PgPool, Row};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// The provider-callback credential. Capture turns an order into a
+/// boarding pass, so the fake provider's webhook is server-to-server only.
+const API_KEY: &str = "llk_test_orders_it_key";
+
 async fn setup(offset: i64) -> Option<(PgPool, Uuid, axum::Router)> {
     let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
         eprintln!("TEST_DATABASE_URL not set — skipping");
@@ -27,6 +31,9 @@ async fn setup(offset: i64) -> Option<(PgPool, Uuid, axum::Router)> {
         .expect("connect to test database");
     lulan_api::MIGRATOR.run(&pool).await.expect("migrations");
     lulan_api::seed::seed(&pool).await.expect("seed");
+    lulan_api::auth::bootstrap_admin_key(&pool, API_KEY)
+        .await
+        .expect("bootstrap key");
 
     let trip_id: Uuid =
         sqlx::query("SELECT t.id FROM trips t JOIN routes r ON r.id = t.route_id WHERE r.code = 'BTG-CEB' ORDER BY t.departs_at DESC LIMIT 1 OFFSET $1")
@@ -80,7 +87,20 @@ async fn request(
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    request_keyed(app, method, uri, body, None).await
+}
+
+async fn request_keyed(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    api_key: Option<&str>,
+) -> (StatusCode, Value) {
     let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(key) = api_key {
+        builder = builder.header("x-api-key", key);
+    }
     let body = match body {
         Some(v) => {
             builder = builder.header("content-type", "application/json");
@@ -185,11 +205,26 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     assert!(!seat_available(&avail, "5A"));
     assert!(!seat_available(&avail, "5B"));
 
+    // Minting a payment intent is gated exactly like reading the order:
+    // the id alone is not a credential.
+    let (status, _) = request(
+        &app,
+        "POST",
+        &format!("/v1/orders/{order_id}/payment"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "payment intents must not be mintable from the order id alone"
+    );
+
     // Request payment → PendingPayment with a fake intent.
     let (status, payment) = request(
         &app,
         "POST",
-        &format!("/v1/orders/{order_id}/payment"),
+        &format!("/v1/orders/{order_id}/payment?token={retrieval}"),
         Some(json!({})),
     )
     .await;
@@ -197,12 +232,28 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     assert_eq!(payment["status"], "pending_payment");
     let intent = payment["payment_intent_id"].as_str().unwrap().to_string();
 
-    // Provider webhook: succeeded → Paid.
-    let (status, hook) = request(
+    // Capture is the free-travel endpoint: without the integration
+    // credential it is refused, intent id or not.
+    let (status, _) = request(
         &app,
         "POST",
         "/v1/payments/fake/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "anonymous callers must not be able to capture payment"
+    );
+
+    // Provider webhook: succeeded → Paid.
+    let (status, hook) = request_keyed(
+        &app,
+        "POST",
+        "/v1/payments/fake/webhook",
+        Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
+        Some(API_KEY),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -211,11 +262,12 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     assert_eq!(hook["applied"], true);
 
     // Duplicate delivery: acknowledged, not applied, state unchanged.
-    let (status, dup) = request(
+    let (status, dup) = request_keyed(
         &app,
         "POST",
         "/v1/payments/fake/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
+        Some(API_KEY),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -223,22 +275,34 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     assert_eq!(dup["order_status"], "ticketed");
 
     // Out-of-order failure after capture: same idempotent no-op.
-    let (status, late_fail) = request(
+    let (status, late_fail) = request_keyed(
         &app,
         "POST",
         "/v1/payments/fake/webhook",
         Some(json!({"payment_intent_id": intent, "status": "failed"})),
+        Some(API_KEY),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(late_fail["applied"], false);
     assert_eq!(late_fail["order_status"], "ticketed");
 
-    // Paid orders cannot be cancelled.
+    // Cancellation is gated too — and authorization is checked before
+    // state, so an anonymous caller learns nothing about the order.
     let (status, _) = request(
         &app,
         "POST",
         &format!("/v1/orders/{order_id}/cancel"),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Paid orders cannot be cancelled.
+    let (status, _) = request(
+        &app,
+        "POST",
+        &format!("/v1/orders/{order_id}/cancel?token={retrieval}"),
         Some(json!({})),
     )
     .await;
@@ -366,10 +430,11 @@ async fn cancel_and_expiry_release_inventory() {
     )
     .await;
     let order_id = order["order_id"].as_str().unwrap();
+    let cancel_token = order["retrieval_token"].as_str().unwrap();
     let (status, cancelled) = request(
         &app,
         "POST",
-        &format!("/v1/orders/{order_id}/cancel"),
+        &format!("/v1/orders/{order_id}/cancel?token={cancel_token}"),
         Some(json!({})),
     )
     .await;
@@ -460,4 +525,121 @@ async fn cancel_and_expiry_release_inventory() {
         .await
         .unwrap();
     assert!(delivered > 0, "outbox must drain");
+}
+
+/// A trip id is enough to bypass search, so "is this departure still for
+/// sale?" has to be enforced where inventory is resolved, not where it is
+/// listed. Both fixtures are dated in the PAST so they sort behind every
+/// seeded trip and other suites' `OFFSET n` fixtures don't shift.
+#[tokio::test]
+async fn departed_and_cancelled_trips_cannot_be_sold() {
+    let Some((pool, _, app)) = setup(4).await else {
+        return;
+    };
+
+    let (route_id, resource_id): (Uuid, Uuid) = sqlx::query_as(
+        "SELECT t.route_id, t.resource_id FROM trips t
+         JOIN routes r ON r.id = t.route_id WHERE r.code = 'BTG-CEB' LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // Idempotent across reruns.
+    sqlx::query("DELETE FROM trips WHERE service_number = 'PAST-TEST'")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let mut ids = Vec::new();
+    for (hours_ago, status) in [(2i64, "scheduled"), (3, "cancelled")] {
+        let id = Uuid::new_v4();
+        let departs_at = chrono::Utc::now() - chrono::Duration::hours(hours_ago);
+        sqlx::query(
+            "INSERT INTO trips (id, route_id, resource_id, service_number, service_date,
+                                departs_at, segment_count, status)
+             VALUES ($1, $2, $3, 'PAST-TEST', $4, $5, 3, $6)",
+        )
+        .bind(id)
+        .bind(route_id)
+        .bind(resource_id)
+        .bind(departs_at.date_naive())
+        .bind(departs_at)
+        .bind(status)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    let (departed, cancelled) = (ids[0], ids[1]);
+
+    let booking = |trip: Uuid| {
+        json!({
+            "trip_id": trip,
+            "passengers": [{"full_name": "Too Late", "type": "adult"}],
+            "guest_contact": "late@example.com",
+            "items": [{"unit_code": "5A", "origin": "BTG", "destination": "CEB"}],
+        })
+    };
+
+    for (trip, label) in [(departed, "departed"), (cancelled, "cancelled")] {
+        // Quoting it is already refused — the customer never sees a price
+        // for a seat they cannot buy.
+        let (status, body) = request(&app, "POST", "/v1/quotes", Some(booking(trip))).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "quote on a {label} trip: {body}"
+        );
+
+        let (status, body) = request(&app, "POST", "/v1/orders", Some(booking(trip))).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "order on a {label} trip: {body}"
+        );
+
+        // And nothing was written.
+        let orders: i64 = sqlx::query_scalar("SELECT count(*) FROM order_items WHERE trip_id = $1")
+            .bind(trip)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(orders, 0, "a {label} trip must not accumulate bookings");
+    }
+
+    // Holding a seat on one is refused for the same reason.
+    let (status, _) = request(
+        &app,
+        "POST",
+        "/v1/holds",
+        Some(json!({
+            "trip_id": departed,
+            "items": [{"unit_code": "5A", "origin": "BTG", "destination": "CEB"}],
+        })),
+    )
+    .await;
+    assert!(
+        status == StatusCode::CONFLICT || status == StatusCode::SERVICE_UNAVAILABLE,
+        "holds on a departed trip must not succeed, got {status}"
+    );
+
+    // Reading stays open: crew and support still look at past departures.
+    let (status, _) = request(
+        &app,
+        "GET",
+        &format!("/v1/trips/{departed}/availability?origin=BTG&destination=CEB"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "availability is a read; only selling is gated"
+    );
+
+    sqlx::query("DELETE FROM trips WHERE service_number = 'PAST-TEST'")
+        .execute(&pool)
+        .await
+        .unwrap();
 }

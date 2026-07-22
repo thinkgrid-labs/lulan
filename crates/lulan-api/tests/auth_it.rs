@@ -4,7 +4,7 @@
 //!
 //! Single test fn: it mutates process env (IdP config, rate limit), so
 //! everything runs on one timeline. Uses the offset-2 trip, seats
-//! 12A/12B/12C only (quotes_it wipes that trip's orders at ITS start and
+//! 12A–12D and 9A only (quotes_it wipes that trip's orders at ITS start and
 //! runs before this binary alphabetically… no: auth_it runs first — each
 //! suite cleans its own fixtures, so ordering is irrelevant).
 
@@ -437,6 +437,105 @@ async fn auth_identity_idempotency_and_rate_limits() {
     .await
     .unwrap();
     assert_eq!(twelve_c_orders, 1);
+
+    // A key belongs to ONE caller. Another guest reusing the same string
+    // must never be handed the first guest's order — that response carries
+    // their passenger names and the retrieval token that reads and claims
+    // the booking.
+    let (status, other) = call(
+        &app,
+        "POST",
+        "/v1/orders",
+        Some(order_body(
+            trip_id,
+            "12D",
+            json!({"guest_contact": "someone-else@example.com"}),
+        )),
+        Call {
+            idempotency: Some("auth-it-retry-1"),
+            ..Call::default()
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+    assert_ne!(
+        first["order_id"], other["order_id"],
+        "one caller's Idempotency-Key must not replay another caller's order"
+    );
+    assert!(
+        other["retrieval_token"] != first["retrieval_token"],
+        "a replayed response would leak the first booking's credential"
+    );
+
+    // Same caller, same key, different request: a client bug, refused
+    // rather than answered with an unrelated booking.
+    let (status, body) = call(
+        &app,
+        "POST",
+        "/v1/orders",
+        Some(order_body(
+            trip_id,
+            "12B",
+            json!({"guest_contact": "retry@example.com"}),
+        )),
+        Call {
+            idempotency: Some("auth-it-retry-1"),
+            ..Call::default()
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    // A failed booking releases its key: the seat is gone, so this 409s —
+    // and the same key must still be usable for the retry that follows.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/v1/orders",
+        Some(order_body(
+            trip_id,
+            "12C",
+            json!({"guest_contact": "release@example.com"}),
+        )),
+        Call {
+            idempotency: Some("auth-it-release-1"),
+            ..Call::default()
+        },
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "12C was booked above");
+    let (status, retried) = call(
+        &app,
+        "POST",
+        "/v1/orders",
+        Some(order_body(
+            trip_id,
+            "9A",
+            json!({"guest_contact": "release@example.com"}),
+        )),
+        Call {
+            idempotency: Some("auth-it-release-1"),
+            ..Call::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a key held by a booking that never happened must be reusable: {retried}"
+    );
+
+    // Currency is the fare ruleset's, not a constant baked into the engine.
+    let ruleset_currency: String =
+        sqlx::query_scalar("SELECT rules->>'currency' FROM fare_rules WHERE active LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        retried["currency"].as_str().unwrap(),
+        ruleset_currency,
+        "the order must be denominated in the currency that priced it"
+    );
 
     // ---- Rate limiting (needs Redis) --------------------------------------
     if redis.is_some() {
