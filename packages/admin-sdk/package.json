@@ -2,7 +2,7 @@
   "name": "@lulan/admin-sdk",
   "version": "0.7.5",
   "description": "Typed TypeScript client for the Lulan admin operations API — staff RBAC, network & schedule management, fare publishing, manifests, refunds.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/thinkgrid-labs/lulan.git",

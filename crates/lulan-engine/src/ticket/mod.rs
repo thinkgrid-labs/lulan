@@ -1,7 +1,7 @@
 //! Ticket issuance and boarding (Phase 5).
 //!
 //! On `Paid → Ticketed`, one **Ed25519-signed ticket per passenger-seat**
-//! is issued. The wire format (shared contract with the MIT
+//! is issued. The wire format (shared contract with the
 //! `lulan-validate` crate — keep the two in sync):
 //!
 //! ```text

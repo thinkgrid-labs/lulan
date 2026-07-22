@@ -37,6 +37,35 @@ fn max_hold_ttl() -> u64 {
         .unwrap_or(MAX_HOLD_TTL_SECS)
 }
 
+/// Stampede control (plan §Phase 2). `POST /v1/holds` needs no credential,
+/// so nothing else stops one session from soft-holding a whole fleet for
+/// half an hour and taking it off sale.
+///
+/// Two blunt limits, neither of which needs to know who the caller is —
+/// which matters, because the alternatives (API key, IP) are absent or
+/// spoofable here:
+///
+/// 1. A cap on seats per request.
+/// 2. A ceiling on how much of one trip may be held at once.
+///
+/// The second degrades honestly under genuine peak load: at the ceiling,
+/// new holds are refused. That is survivable precisely because **a hold is
+/// not a sale** — claims are authoritative and unaffected, so a customer
+/// refused a hold can still complete a booking, just without the seat
+/// being reserved while they type.
+const MAX_SEATS_PER_HOLD: usize = 20;
+const DEFAULT_TRIP_HOLD_FRACTION: f64 = 0.75;
+
+/// Fraction of a trip's seats that may carry a hold simultaneously.
+/// `LULAN_HOLD_MAX_TRIP_FRACTION`; 0 or >= 1 disables the ceiling.
+fn trip_hold_fraction() -> f64 {
+    std::env::var("LULAN_HOLD_MAX_TRIP_FRACTION")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|f: &f64| f.is_finite() && *f > 0.0)
+        .unwrap_or(DEFAULT_TRIP_HOLD_FRACTION)
+}
+
 /// One seat to hold. Holds cover seats only; pools are claimed at order
 /// time.
 #[derive(Deserialize)]
@@ -119,6 +148,13 @@ pub async fn create_hold(
         }
     };
 
+    if flat.len() > MAX_SEATS_PER_HOLD {
+        return Err(ApiError::BadRequest(format!(
+            "a hold covers at most {MAX_SEATS_PER_HOLD} seats; split larger \
+             selections across separate holds"
+        )));
+    }
+
     let store = state.inventory()?;
     let holds = state.holds()?;
 
@@ -158,6 +194,42 @@ pub async fn create_hold(
             origin: item.origin.clone(),
             destination: item.destination.clone(),
         });
+    }
+
+    // Per-trip ceiling. Checked per distinct trip so a round trip is
+    // judged on each leg's own pressure, and only when a ceiling is in
+    // force. A failure to measure never blocks the hold: this is abuse
+    // control, and like the rate limiter it must not become the outage.
+    let fraction = trip_hold_fraction();
+    if fraction < 1.0 {
+        let mut wanted: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
+        for (trip_id, _, _) in &seats {
+            *wanted.entry(*trip_id).or_default() += 1;
+        }
+        for (trip_id, adding) in wanted {
+            let total = store.seat_count(trip_id).await?;
+            if total == 0 {
+                continue;
+            }
+            let ceiling = ((total as f64) * fraction).floor().max(1.0) as usize;
+            match holds.held_unit_count(trip_id, ceiling).await {
+                Ok(held) if held + adding > ceiling => {
+                    tracing::info!(
+                        %trip_id, held, adding, ceiling,
+                        "hold refused: trip is at its hold ceiling"
+                    );
+                    return Err(ApiError::Conflict(format!(
+                        "too many seats on trip {trip_id} are being held right now — \
+                         try again shortly, or book without a hold (holds never gate \
+                         the sale)"
+                    )));
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, %trip_id, "hold pressure unknown — allowing");
+                }
+            }
+        }
     }
 
     let ttl = std::time::Duration::from_secs(

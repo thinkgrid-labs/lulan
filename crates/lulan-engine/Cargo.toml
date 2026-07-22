@@ -1,7 +1,7 @@
 [package]
 name = "lulan-engine"
 description = "Lulan core engine: domain model, segment inventory, events, orders, ticketing"
-license = "AGPL-3.0-only"
+license.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

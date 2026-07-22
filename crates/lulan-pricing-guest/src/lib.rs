@@ -1,5 +1,5 @@
 //! Reference pricing module for the `lulan:pricing` interface
-//! (see lulan-pricing/wit/pricing.wit). MIT-licensed: copy this crate as
+//! (see lulan-pricing/wit/pricing.wit). Copy this crate as
 //! the starting point for a custom fare engine.
 //!
 //! Build: `cargo build -p lulan-pricing-guest --target wasm32-unknown-unknown --release`

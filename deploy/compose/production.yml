@@ -62,6 +62,9 @@ services:
       LULAN_RATE_LIMIT: ${LULAN_RATE_LIMIT:-300}
       LULAN_HOLD_DEFAULT_TTL_SECS: ${LULAN_HOLD_DEFAULT_TTL_SECS:-600}
       LULAN_HOLD_MAX_TTL_SECS: ${LULAN_HOLD_MAX_TTL_SECS:-1800}
+      # Stampede control: fraction of a trip's seats that may be held
+      # at once. >= 1 disables it. Refusing a hold never refuses a sale.
+      LULAN_HOLD_MAX_TRIP_FRACTION: ${LULAN_HOLD_MAX_TRIP_FRACTION:-0.75}
       LULAN_DB_POOL: ${LULAN_DB_POOL:-32}
       RUST_LOG: ${RUST_LOG:-lulan_api=info,lulan_engine=info}
     volumes:

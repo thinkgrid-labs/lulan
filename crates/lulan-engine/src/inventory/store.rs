@@ -270,6 +270,19 @@ impl InventoryStore {
         }
     }
 
+    /// How many seats this trip has. The denominator for the per-trip
+    /// hold ceiling.
+    pub async fn seat_count(&self, trip_id: Uuid) -> Result<i64, StoreError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM seat_occupancy so
+             JOIN capacity_units cu ON cu.id = so.unit_id
+             WHERE so.trip_id = $1 AND cu.kind = 'seat'",
+        )
+        .bind(trip_id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     /// Current occupancy mask for one seat, reinterpreted as u64.
     pub async fn seat_mask(&self, trip_id: Uuid, unit_id: Uuid) -> Result<Option<u64>, StoreError> {
         let mask = sqlx::query_scalar::<_, i64>(

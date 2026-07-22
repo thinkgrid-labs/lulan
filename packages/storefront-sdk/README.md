@@ -1,6 +1,6 @@
 # @lulan/storefront-sdk
 
-Typed, zero-dependency TypeScript client for the [Lulan](https://github.com/thinkgrid-labs/lulan) reservation engine. MIT-licensed — use it in commercial storefronts freely.
+Typed, zero-dependency TypeScript client for the [Lulan](https://github.com/thinkgrid-labs/lulan) reservation engine. Apache-2.0 — use it in commercial storefronts freely.
 
 Works in Node 18+, browsers, and edge runtimes (anything with `fetch`).
 

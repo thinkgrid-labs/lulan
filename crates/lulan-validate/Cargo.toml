@@ -1,7 +1,7 @@
 [package]
 name = "lulan-validate"
 description = "Offline Lulan ticket verification: pure, no server dependency, compiles to WASM"
-license = "MIT"
+license.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

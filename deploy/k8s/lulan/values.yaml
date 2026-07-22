@@ -23,6 +23,8 @@ env:
   LULAN_RATE_LIMIT: "300"
   LULAN_HOLD_DEFAULT_TTL_SECS: "600"
   LULAN_HOLD_MAX_TTL_SECS: "1800"
+  # Fraction of a trip's seats holdable at once ("1" disables).
+  LULAN_HOLD_MAX_TRIP_FRACTION: "0.75"
   LULAN_DB_POOL: "32"
   # Browser origins allowed to call the API (comma-separated, or "*").
   # Empty = server-to-server only.

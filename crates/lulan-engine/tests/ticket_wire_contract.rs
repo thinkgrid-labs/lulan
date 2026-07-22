@@ -1,5 +1,5 @@
-//! Cross-crate wire-contract test: a ticket signed by the AGPL engine must
-//! verify with the MIT `lulan-validate` crate — the exact code crew
+//! Cross-crate wire-contract test: a ticket signed by the engine must
+//! verify with the `lulan-validate` crate — the exact code crew
 //! apps embed. If the CBOR shapes ever drift apart, this breaks first.
 
 use lulan_engine::ticket::{TicketClaims, TicketSigner};

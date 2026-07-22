@@ -1,7 +1,7 @@
 [package]
 name = "lulan-loadgen"
 description = "Lulan load harness: concurrency invariant checker and benchmarks"
-license = "AGPL-3.0-only"
+license.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

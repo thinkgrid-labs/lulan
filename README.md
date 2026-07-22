@@ -1,8 +1,7 @@
 # Lulan — Open-source Headless Reservation Infrastructure for Modern Transit.
 
 [![CI](https://github.com/thinkgrid-labs/lulan/actions/workflows/ci.yml/badge.svg)](https://github.com/thinkgrid-labs/lulan/actions/workflows/ci.yml)
-[![License: AGPL-3.0](https://img.shields.io/badge/core-AGPL--3.0-blue.svg)](LICENSE)
-[![SDKs: MIT](https://img.shields.io/badge/SDKs%20%26%20validators-MIT-green.svg)](#license)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 
 **Lulan is an open-source, API-first reservation platform for airlines, buses, ferries, rail, and any operator that sells capacity instead of products.** It runs in two modes behind one API: a **complete standalone booking engine** — inventory, pricing, payments, QR ticketing, offline validation, end to end — or an **orchestration layer** that owns the customer-facing reservation experience and synchronizes confirmed bookings into the operational systems you already run (airline PSS, ferry manifest backend, bus dispatch) through sync connectors.
@@ -53,8 +52,9 @@ Selling a seat means atomically claiming a **span of segments** on a **specific 
 | **Multi-passenger itineraries** | One order, N passengers; per-passenger seats and fares, including regulated concession fares (child, senior, disability) that many markets mandate by law. |
 | **Pluggable pricing (WASM)** | Deterministic integer-only fare rules, plus operator-supplied pricing modules run in a fuel-metered, memory-capped WebAssembly sandbox with **no host imports** — measured at p95 ≈ 443 µs per quote. Native and WASM engines are property-tested to be bit-identical. |
 | **Signed quotes** | Short-TTL HMAC quote tokens: the price shown is the price charged, tamper-proof. |
-| **Offline ticket validation** | Ed25519-signed CBOR QR tickets (~245 bytes). The MIT `lulan-validate` crate verifies them with no server, no clock assumptions, and compiles to WebAssembly for browser and mobile boarding apps. |
+| **Offline ticket validation** | Ed25519-signed CBOR QR tickets (~245 bytes). The `lulan-validate` crate verifies them with no server, no clock assumptions, and compiles to WebAssembly for browser and mobile boarding apps. |
 | **Offline boarding sync** | Gate and crew devices journal scans locally and sync idempotent batches when connectivity returns; duplicate and cloned-QR scans are detected and flagged. |
+| **Payments without lock-in** | The provider is a port described by configuration, not code: a JSON file names a PSP's create/refund/callback endpoints, auth style, field mappings and signature scheme. Stripe ships as a preset; anything else is a file. |
 | **Headless & self-hostable** | JSON REST APIs only — bring your own storefront, kiosk, or POS. One Docker image, PostgreSQL + Redis, no per-booking fees. |
 
 ## How it works
@@ -63,6 +63,10 @@ A booking flows through seven stages — two optional, all independently verifia
 
 1. **Search & availability** — `GET /v1/trips/search` returns candidate trips per leg (one-way or round-trip), each with operator, service number, vehicle, schedule, and span-aware seat/pool availability. `GET /v1/trips/{id}/availability` drills into the seat map, including which seats other sessions currently hold.
 2. **Hold** *(optional)* — `POST /v1/holds` soft-holds the selected seats across every leg as **one itinerary hold** with a countdown (`expires_at`, operator-configurable). Expired holds auto-release with zero cleanup; buying with an expired hold is a deterministic 409. Holds never gate the sale — claims at order time are the source of truth.
+   Holds are bounded so one session cannot take a fleet off sale: at most
+   20 seats per request, and a configurable ceiling on how much of a trip
+   may be held at once. Both are safe to be blunt about, because a refused
+   hold is not a refused sale — the claim at order time is authoritative.
 3. **Add-ons** *(optional)* — `GET /v1/ancillaries` lists everything the operator sells alongside the fare (baggage, meals, insurance, priority boarding), per-passenger or per-order, tied to one leg or the whole itinerary.
 4. **Quote** — `POST /v1/quotes` prices the itinerary + add-ons (per passenger type, occupancy, peak day, round-trip and promo discounts) and returns a signed, short-lived quote token locking the full total.
 5. **Order** — `POST /v1/orders` atomically claims every item on every leg for N passengers; a conflict on *any* leg rolls back everything. One order, one payment — fares and add-ons together.
@@ -255,7 +259,7 @@ publishes a ruleset per currency.
             (truth +   (holds,  (operator-supplied,
              events)    cache)   no host imports)
 
-   Offline edge:  lulan-validate (MIT, wasm32) verifies tickets
+   Offline edge:  lulan-validate (wasm32) verifies tickets
                   with zero server dependency.
 ```
 
@@ -280,12 +284,17 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] Offline boarding-scan sync with replay/clone detection
 - [x] Webhooks: HMAC-signed deliveries with durable retries
 - [x] Authentication: API keys + roles, identity-provider port, guest checkout with retrieval tokens
-- [x] Idempotent booking retries + per-caller rate limiting
+- [x] Order-scoped authorization — paying, cancelling, reading an order or its tickets each require that order's credential; the id alone is not one
+- [x] Idempotent booking retries — the key is reserved before the write, scoped to the caller and bound to the request body — plus per-caller rate limiting
 - [x] OpenAPI spec (served at `/openapi.json`) + TypeScript SDK (`@lulan/storefront-sdk`)
 - [x] Prometheus `/metrics` (OTLP traces planned)
 - [x] Itineraries: one-way, round-trip & multi-city (one atomic order across legs, round-trip fares)
 - [x] Itinerary holds: one hold across all legs, TTL auto-release, live held-seat map
 - [x] Ancillaries: operator add-on catalog (baggage, meals, insurance) priced into quotes & orders
+- [x] Sale gating: departed and cancelled departures are refused wherever inventory resolves (a trip id bypasses search; sellability does not)
+- [x] Per-currency orders — money is recorded in the currency the active fare ruleset priced it in
+- [x] Hold stampede control: per-request seat cap + a configurable per-trip hold ceiling, neither of which can gate a sale
+- [x] Opt-in CORS so a browser storefront can call the API directly
 - [x] Production deploys: Compose (external or bundled databases, auto-TLS) + Helm chart
 - [x] GTFS importer — bring your existing schedule feed
 - [x] Open-loop benchmark mode (published seat-lock latencies vs the <20 ms target)
@@ -306,12 +315,14 @@ Lulan is developed in the open and welcomes issues, design discussions, and pull
 
 ## License
 
-| Package | License | Why |
-|---|---|---|
-| `lulan-engine`, `lulan-api`, `lulan-pricing` (host) | **AGPL-3.0** | The core stays open — improvements to hosted deployments flow back. |
-| `lulan-validate` (offline ticket verification) | **MIT** | Embed it in proprietary boarding and kiosk apps freely. |
-| `lulan-pricing-guest` (reference WASM pricing module) | **MIT** | Copy it as the starting point for your own fare engine. |
-| SDKs, UI components, examples | **MIT** | Build commercial storefronts without restriction. |
+[Apache-2.0](LICENSE) — the whole repository: engine, API, pricing, SDKs,
+the offline validator, deployment manifests and examples.
+
+One licence, no carve-outs. Embed `lulan-validate` in a proprietary
+boarding app, ship `@lulan/storefront-sdk` in a commercial storefront, run
+a modified Lulan as a hosted service — all fine, and none of it needs a
+lawyer's opinion first. The Apache patent grant travels with the code, and
+its retaliation clause applies to anyone who sues over it.
 
 ---
 

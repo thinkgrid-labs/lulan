@@ -266,7 +266,7 @@ async fn hold_flow_protects_spans_and_feeds_claims() {
     // slate so holds from previous runs (10-minute TTL) can't collide.
     let _: () = redis::cmd("FLUSHDB").query_async(&mut redis).await.unwrap();
 
-    let app = lulan_api::router(AppState::new(Some(pool.clone()), Some(redis)).await);
+    let app = lulan_api::router(AppState::new(Some(pool.clone()), Some(redis.clone())).await);
     let holds_uri = "/v1/holds".to_string();
 
     // Hold BTG→ILO on 3C.
@@ -405,4 +405,167 @@ async fn hold_flow_protects_spans_and_feeds_claims() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "sold span cannot be held");
+
+    // ---- The per-trip index backs the seat map ------------------------
+    // `held` used to come from a MATCH scan over the whole Redis keyspace;
+    // it now comes from a per-trip set. Assert the key exists, is scoped to
+    // this trip, and holds only units that actually have holds.
+    let index_key = format!("lulan:holds:{{{trip_id}}}:index");
+    let indexed: Vec<String> = redis::cmd("SMEMBERS")
+        .arg(&index_key)
+        .query_async(&mut redis)
+        .await
+        .unwrap();
+    assert!(
+        !indexed.is_empty(),
+        "a live hold must be indexed under its trip"
+    );
+    let scan_keys: (u64, Vec<String>) = redis::cmd("SCAN")
+        .arg(0)
+        .arg("MATCH")
+        .arg("lulan:holds:*:index")
+        .arg("COUNT")
+        .arg(1000)
+        .query_async(&mut redis)
+        .await
+        .unwrap();
+    assert_eq!(
+        scan_keys.1,
+        vec![index_key.clone()],
+        "exactly one trip index — the seat map reads that, not the keyspace"
+    );
+
+    // ---- Stampede control: the per-trip hold ceiling ------------------
+    // One held seat is the whole allowance, so the next hold is refused.
+    unsafe { std::env::set_var("LULAN_HOLD_MAX_TRIP_FRACTION", "0.001") };
+    let (status, body) = post_json(
+        &app,
+        &holds_uri,
+        json!({"trip_id": trip_id, "items": [{"unit_code": "4A", "origin": "BTG", "destination": "CTC"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("being held"),
+        "the refusal must explain itself: {body}"
+    );
+
+    // The property that makes the ceiling acceptable: refusing a HOLD is
+    // not refusing a SALE. The same seat claims fine at the ceiling.
+    let (status, _) = post_json(
+        &app,
+        &format!("/v1/trips/{trip_id}/claims"),
+        json!({"unit_code": "4A", "origin": "BTG", "destination": "CTC"}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the ceiling must never gate the authoritative claim"
+    );
+
+    // A ceiling of >= 1.0 disables it.
+    unsafe { std::env::set_var("LULAN_HOLD_MAX_TRIP_FRACTION", "1") };
+    let (status, _) = post_json(
+        &app,
+        &holds_uri,
+        json!({"trip_id": trip_id, "items": [{"unit_code": "4B", "origin": "BTG", "destination": "CTC"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "ceiling disabled");
+    unsafe { std::env::remove_var("LULAN_HOLD_MAX_TRIP_FRACTION") };
+
+    // ---- Per-request seat cap ----------------------------------------
+    let many: Vec<Value> = (0..25)
+        .map(|i| {
+            json!({"unit_code": format!("5{}", (b'A' + (i % 4) as u8) as char),
+                        "origin": "BTG", "destination": "CTC"})
+        })
+        .collect();
+    let (status, body) =
+        post_json(&app, &holds_uri, json!({"trip_id": trip_id, "items": many})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("at most"),
+        "{body}"
+    );
+
+    // ---- Expiry prunes the index -------------------------------------
+    // A hold that ages out must stop showing as held AND leave no index
+    // entry behind — the self-healing that keeps the set from growing.
+    let (status, short) = post_json(
+        &app,
+        &holds_uri,
+        json!({"trip_id": trip_id, "ttl_seconds": 30,
+               "items": [{"unit_code": "6A", "origin": "BTG", "destination": "CTC"}]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{short}");
+    // Age it out by rewriting its expiry in place, rather than sleeping.
+    let unit_keys: (u64, Vec<String>) = redis::cmd("SCAN")
+        .arg(0)
+        .arg("MATCH")
+        .arg(format!("lulan:holds:{{{trip_id}}}:unit:*"))
+        .arg("COUNT")
+        .arg(1000)
+        .query_async(&mut redis)
+        .await
+        .unwrap();
+    let mut expired_unit = None;
+    for key in unit_keys.1 {
+        let fields: std::collections::HashMap<String, String> = redis::cmd("HGETALL")
+            .arg(&key)
+            .query_async(&mut redis)
+            .await
+            .unwrap();
+        for (hold, value) in fields {
+            let mut parts = value.split(':');
+            let (_, hi, lo) = (
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+                parts.next().unwrap(),
+            );
+            let _: () = redis::cmd("HSET")
+                .arg(&key)
+                .arg(&hold)
+                .arg(format!("1:{hi}:{lo}")) // expired in 1970
+                .query_async(&mut redis)
+                .await
+                .unwrap();
+            expired_unit = Some(key.rsplit(':').next().unwrap().to_string());
+        }
+    }
+    assert!(expired_unit.is_some(), "test set up at least one hold");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/trips/{trip_id}/availability?origin=BTG&destination=CTC"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !seat_state(&body, "6A").1,
+        "an expired hold must not grey out a seat"
+    );
+    let indexed: Vec<String> = redis::cmd("SMEMBERS")
+        .arg(&index_key)
+        .query_async(&mut redis)
+        .await
+        .unwrap();
+    assert!(
+        !indexed.iter().any(|u| Some(u) == expired_unit.as_ref()),
+        "reading the seat map must prune the units whose holds expired"
+    );
 }
