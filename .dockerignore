@@ -7,3 +7,4 @@ deploy/
 .git/
 .github/
 *.md
+assets/

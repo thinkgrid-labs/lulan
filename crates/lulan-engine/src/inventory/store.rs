@@ -24,6 +24,15 @@ pub enum StoreError {
     },
     #[error("invalid segment span: {0}")]
     Span(#[from] SpanError),
+    /// A stored event stream does not replay through the state machine.
+    /// Only reachable if the log and the code disagree — surfaced rather
+    /// than panicked so one bad stream cannot take the process down.
+    #[error("event stream {stream_id} is unreplayable at seq {stream_seq}: {detail}")]
+    UnreplayableStream {
+        stream_id: uuid::Uuid,
+        stream_seq: i32,
+        detail: String,
+    },
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -542,6 +551,7 @@ impl InventoryStore {
             FROM route_stops rs
             JOIN locations l ON l.id = rs.location_id
             WHERE rs.route_id = $1 AND l.code IN ($2, $3)
+            ORDER BY rs.stop_index
             "#,
         )
         .bind(route_id)
@@ -550,26 +560,17 @@ impl InventoryStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let stop_of = |code: &str| -> Result<(i16, i32), StoreError> {
-            rows.iter()
-                .find(|r| r.get::<String, _>("code") == code)
-                .map(|r| {
-                    (
-                        r.get::<i16, _>("stop_index"),
-                        r.get::<i32, _>("depart_offset_min"),
-                    )
+        let stops: Vec<Stop> = rows
+            .iter()
+            .map(|r| {
+                Ok(Stop {
+                    code: r.try_get("code")?,
+                    index: r.try_get("stop_index")?,
+                    depart_offset: r.try_get("depart_offset_min")?,
                 })
-                .ok_or_else(|| StoreError::UnknownStop(code.to_string()))
-        };
-        let (from, depart_offset) = stop_of(origin)?;
-        let (to, _) = stop_of(destination)?;
-        if from >= to {
-            return Err(StoreError::StopsOutOfOrder {
-                origin: origin.to_string(),
-                destination: destination.to_string(),
-            });
-        }
-        Ok((SegmentSpan::new(from as u8, to as u8)?, depart_offset))
+            })
+            .collect::<Result<_, sqlx::Error>>()?;
+        pick_span(&stops, origin, destination)
     }
 
     async fn fare_availability(
@@ -636,6 +637,56 @@ impl InventoryStore {
             })
             .collect()
     }
+}
+
+/// One stop on a route, as `pick_span` needs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Stop {
+    pub code: String,
+    pub index: i16,
+    pub depart_offset: i32,
+}
+
+/// Resolve `origin → destination` to a span over a route's stops.
+///
+/// A route may visit the same location twice — loops, out-and-back
+/// services, anything that returns to base — so "the stop with this code"
+/// is ambiguous. The rule is: the EARLIEST occurrence of the origin, then
+/// the earliest occurrence of the destination *after* it.
+///
+/// Taking the first match of each (what this used to do) silently broke
+/// the closing leg of any loop: on A→B→C→A, booking C→A matched A at
+/// index 0, decided the journey ran backwards, and refused the sale.
+pub(crate) fn pick_span(
+    stops: &[Stop],
+    origin: &str,
+    destination: &str,
+) -> Result<(SegmentSpan, i32), StoreError> {
+    let mut ordered: Vec<&Stop> = stops.iter().collect();
+    ordered.sort_by_key(|s| s.index);
+
+    let from = ordered
+        .iter()
+        .find(|s| s.code == origin)
+        .ok_or_else(|| StoreError::UnknownStop(origin.to_string()))?;
+
+    // Distinguish "we do not call there at all" from "we call there, but
+    // not after your origin" — different problems, different messages.
+    if !ordered.iter().any(|s| s.code == destination) {
+        return Err(StoreError::UnknownStop(destination.to_string()));
+    }
+    let to = ordered
+        .iter()
+        .find(|s| s.code == destination && s.index > from.index)
+        .ok_or_else(|| StoreError::StopsOutOfOrder {
+            origin: origin.to_string(),
+            destination: destination.to_string(),
+        })?;
+
+    Ok((
+        SegmentSpan::new(from.index as u8, to.index as u8)?,
+        from.depart_offset,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -749,4 +800,107 @@ pub async fn release_pool_exec<'e>(
     .execute(executor)
     .await?;
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stops(spec: &[(&str, i16, i32)]) -> Vec<Stop> {
+        spec.iter()
+            .map(|(code, index, depart_offset)| Stop {
+                code: (*code).to_string(),
+                index: *index,
+                depart_offset: *depart_offset,
+            })
+            .collect()
+    }
+
+    /// The linear case: a plain A→B→C→D service.
+    #[test]
+    fn linear_route_spans_and_offsets() {
+        let route = stops(&[
+            ("BTG", 0, 0),
+            ("CTC", 1, 270),
+            ("ILO", 2, 540),
+            ("CEB", 3, 780),
+        ]);
+
+        let (span, offset) = pick_span(&route, "BTG", "CEB").unwrap();
+        assert_eq!((span.from_index(), span.to_index()), (0, 3));
+        assert_eq!(offset, 0, "offset is the ORIGIN's departure");
+
+        let (span, offset) = pick_span(&route, "CTC", "ILO").unwrap();
+        assert_eq!((span.from_index(), span.to_index()), (1, 2));
+        assert_eq!(offset, 270);
+
+        assert!(matches!(
+            pick_span(&route, "CEB", "BTG"),
+            Err(StoreError::StopsOutOfOrder { .. })
+        ));
+    }
+
+    /// The regression: a service that returns to where it started.
+    /// Booking the closing leg used to be refused outright, because the
+    /// destination matched its FIRST occurrence — index 0, behind the
+    /// origin — and looked like a backwards journey.
+    #[test]
+    fn loop_route_resolves_the_closing_leg() {
+        let route = stops(&[
+            ("AAA", 0, 0),
+            ("BBB", 1, 60),
+            ("CCC", 2, 150),
+            ("AAA", 3, 240),
+        ]);
+
+        let (span, offset) = pick_span(&route, "CCC", "AAA").expect("the closing leg is sellable");
+        assert_eq!(
+            (span.from_index(), span.to_index()),
+            (2, 3),
+            "CCC→AAA is the last segment, not a reversed whole-route span"
+        );
+        assert_eq!(offset, 150, "boarding time comes from CCC, not from AAA");
+
+        // And the outbound direction still takes the earliest origin.
+        let (span, offset) = pick_span(&route, "AAA", "CCC").unwrap();
+        assert_eq!((span.from_index(), span.to_index()), (0, 2));
+        assert_eq!(offset, 0);
+    }
+
+    /// Origin repeated: take the earliest, so the span covers the whole
+    /// journey the passenger is actually making.
+    #[test]
+    fn repeated_origin_uses_the_earliest_occurrence() {
+        let route = stops(&[
+            ("AAA", 0, 0),
+            ("BBB", 1, 60),
+            ("AAA", 2, 120),
+            ("CCC", 3, 180),
+        ]);
+        let (span, _) = pick_span(&route, "AAA", "CCC").unwrap();
+        assert_eq!((span.from_index(), span.to_index()), (0, 3));
+    }
+
+    /// A stop we never call at is a different error from one we call at
+    /// in the wrong order — the caller can act on the second, not the first.
+    #[test]
+    fn unknown_and_out_of_order_stops_are_distinguished() {
+        let route = stops(&[("AAA", 0, 0), ("BBB", 1, 60)]);
+        assert!(matches!(
+            pick_span(&route, "ZZZ", "BBB"),
+            Err(StoreError::UnknownStop(code)) if code == "ZZZ"
+        ));
+        assert!(matches!(
+            pick_span(&route, "AAA", "ZZZ"),
+            Err(StoreError::UnknownStop(code)) if code == "ZZZ"
+        ));
+        assert!(matches!(
+            pick_span(&route, "BBB", "AAA"),
+            Err(StoreError::StopsOutOfOrder { .. })
+        ));
+        assert!(matches!(
+            pick_span(&route, "AAA", "AAA"),
+            Err(StoreError::StopsOutOfOrder { .. },),
+        ));
+    }
 }

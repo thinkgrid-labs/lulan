@@ -466,6 +466,33 @@ async fn admin_operations_run_the_business_with_only_idp_tokens() {
             .await
             .unwrap();
     assert_eq!(voided, 1);
+
+    // At the gate, a refunded ticket must not look like a duplicate scan.
+    // These were indistinguishable: any non-issued ticket reported
+    // "already_boarded", telling crew someone had already boarded on this
+    // pass when in fact the sale was cancelled.
+    let voided_ticket: Uuid =
+        sqlx::query_scalar("SELECT id FROM tickets WHERE order_id = $1 AND status = 'void'")
+            .bind(Uuid::parse_str(&order_id).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let (status, scans) = call(
+        &app,
+        "POST",
+        "/v1/scans",
+        Some(json!({
+            "device_id": "gate-1",
+            "scans": [{"ticket_id": voided_ticket, "scanned_at": Utc::now(), "result": "ok"}],
+        })),
+        Some(API_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{scans}");
+    assert_eq!(
+        scans["outcomes"][0]["status"], "void",
+        "a refunded ticket reads as void at the gate, not already_boarded: {scans}"
+    );
     let by_sunny: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_log a JOIN staff s ON s.id = a.staff_id
          WHERE a.action = 'order.refunded' AND s.subject = 'sunny'",

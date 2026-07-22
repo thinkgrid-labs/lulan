@@ -16,6 +16,7 @@ down:
 serve:
     DATABASE_URL=postgres://lulan:lulan@localhost:5432/lulan \
     REDIS_URL=redis://localhost:6379 \
+    LULAN_QUOTE_SECRET=dev-only-quote-secret-not-for-production \
     cargo run -p lulan-api
 
 # Format, lint, test — what CI runs
@@ -48,6 +49,7 @@ loadgen-paced rate="200" duration="30" hold_ratio="0.0":
 serve-release:
     DATABASE_URL=postgres://lulan:lulan@localhost:5432/lulan \
     REDIS_URL=redis://localhost:6379 \
+    LULAN_QUOTE_SECRET=dev-only-quote-secret-not-for-production \
     LULAN_RATE_LIMIT=10000000 LULAN_DB_POOL=50 \
     cargo run --release -p lulan-api
 

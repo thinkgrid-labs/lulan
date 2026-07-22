@@ -59,23 +59,32 @@ async fn seed_fare_rules(pool: &PgPool) -> anyhow::Result<()> {
     // Fail fast if the JSON ever drifts from the engine's schema.
     let _: lulan_pricing::rules::FareRuleSet = serde_json::from_value(rules.clone())?;
 
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SEED_LOCK)
+        .execute(&mut *tx)
+        .await?;
+
     let current: Option<serde_json::Value> = sqlx::query_scalar(
         "SELECT rules FROM fare_rules WHERE active ORDER BY created_at DESC LIMIT 1",
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
     if current.as_ref() == Some(&rules) {
         return Ok(());
     }
 
+    // Exactly one ruleset is active at a time; both statements must land
+    // together or a concurrent seeder can leave two.
     sqlx::query("UPDATE fare_rules SET active = false WHERE active")
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("INSERT INTO fare_rules (id, active, rules) VALUES ($1, true, $2)")
         .bind(Uuid::new_v4())
         .bind(rules)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     println!("seeded default fare rules");
     Ok(())
 }
@@ -136,20 +145,38 @@ async fn seed_ancillaries(pool: &PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Arbitrary but fixed: the advisory-lock key that serialises seeding.
+const SEED_LOCK: i64 = 0x_1F1A_5EED;
+
 pub async fn seed(pool: &PgPool) -> anyhow::Result<()> {
     seed_fare_rules(pool).await?;
     seed_ancillaries(pool).await?;
+
+    // Every step here is a check-then-act, and each one used to be a read
+    // followed by an unguarded write. N callers starting against an empty
+    // database all saw "empty" and all inserted, producing duplicate-key
+    // errors — which integration suites hit whenever one runs against a
+    // fresh database without another having seeded first.
+    //
+    // Each step now takes the SAME transaction-scoped advisory lock, so
+    // seeding is serialised as a whole. The lock is released on commit or
+    // rollback, so a seeder that fails cannot wedge the others.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SEED_LOCK)
+        .execute(&mut *tx)
+        .await?;
+
     let already =
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM routes WHERE code = 'BTG-CEB'")
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await?;
     if already > 0 {
+        tx.commit().await?;
         println!("demo network already seeded");
         seed_return_route(pool).await?;
         return Ok(());
     }
-
-    let mut tx = pool.begin().await?;
 
     // Locations and route.
     let mut location_ids = Vec::new();
@@ -312,15 +339,19 @@ pub async fn seed(pool: &PgPool) -> anyhow::Result<()> {
 /// round-trip itineraries possible (Phase 6.5). Idempotent; also upgrades
 /// databases seeded before the return route existed.
 async fn seed_return_route(pool: &PgPool) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SEED_LOCK)
+        .execute(&mut *tx)
+        .await?;
+
     let already =
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM routes WHERE code = 'CEB-BTG'")
-            .fetch_one(pool)
+            .fetch_one(&mut *tx)
             .await?;
     if already > 0 {
         return Ok(());
     }
-
-    let mut tx = pool.begin().await?;
 
     let resource_id: Uuid =
         sqlx::query_scalar("SELECT id FROM resources WHERE code = 'MV-LULAN-1'")

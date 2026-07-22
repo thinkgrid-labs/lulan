@@ -1,0 +1,192 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 560" width="760" height="560"
+     role="img" aria-labelledby="title desc"
+     font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace">
+  <title id="title">Lulan architecture</title>
+  <desc id="desc">A booking request flows from your storefront over JSON REST into lulan-api
+    (Axum, HTTP/2), through lulan-engine and lulan-pricing, and out to three stores: PostgreSQL
+    holds the source of truth, claims and the event log; Redis holds soft holds and cache; and
+    operator-supplied .wasm pricing modules run in a sandbox with no host imports. A signed QR
+    ticket then leaves for the gate, where lulan-validate compiled to wasm32 verifies it with
+    zero server dependency.</desc>
+
+  <style><![CDATA[
+    /* GitHub renders SVG through <img>, where scripts never run — so this
+       is all declarative CSS. Every label sits inside its own box rather
+       than beside it: text width depends on whichever monospace font the
+       viewer actually has, and annotations hanging off the right edge
+       clipped under wider fallbacks. */
+    :root {
+      --bg:     #ffffff;
+      --ink:    #1f2328;
+      --muted:  #59636e;
+      --line:   #d1d9e0;
+      --accent: #0969da;
+      --commit: #1a7f37;
+      --wasm:   #8250df;
+      --panel:  #f6f8fa;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg:     #0d1117;
+        --ink:    #e6edf3;
+        --muted:  #9198a1;
+        --line:   #3d444d;
+        --accent: #4493f8;
+        --commit: #3fb950;
+        --wasm:   #ab7df8;
+        --panel:  #151b23;
+      }
+    }
+
+    text       { fill: var(--ink); font-size: 13px; }
+    .sm        { fill: var(--muted); font-size: 11px; }
+    .box       { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
+    .conn      { stroke: var(--line); stroke-width: 1.5; fill: none; }
+    .page      { fill: var(--bg); }
+    .label-bg  { fill: var(--bg); }
+    .dot       { fill: var(--accent); }
+    .wasm-text { fill: var(--wasm); }
+    .arrowhead { fill: var(--line); }
+    .ring      { fill: none; stroke: var(--commit); stroke-width: 2; opacity: 0; }
+
+    /* Motion is opt-in. A looping diagram is decoration, and decoration
+       should not override a reader's stated preference. Without it the
+       static frame still reads as a complete diagram. */
+    @media (prefers-reduced-motion: no-preference) {
+      .dot, .ring, .flash-pg, .glow-api, .glow-edge, .link-edge {
+        animation-duration: 7s;
+        animation-iteration-count: infinite;
+      }
+
+      /* 1 — the request leaves the client for the API */
+      .p-in { animation-name: fall-in; }
+      @keyframes fall-in {
+        0%        { transform: translateY(0px);  opacity: 0; }
+        3%        { opacity: 1; }
+        13%       { transform: translateY(56px); opacity: 1; }
+        16%, 100% { transform: translateY(56px); opacity: 0; }
+      }
+
+      /* 2 — the API border lights as it lands */
+      .glow-api { animation-name: glow; }
+      @keyframes glow {
+        0%, 12%   { stroke: var(--line); }
+        17%, 26%  { stroke: var(--accent); }
+        34%, 100% { stroke: var(--line); }
+      }
+
+      /* 3 — the engine fans the work out to all three stores at once */
+      .p-pg    { animation-name: fall-leg; animation-delay: 2.24s; }
+      .p-redis { animation-name: fall-leg; animation-delay: 2.31s; }
+      .p-wasm  { animation-name: fall-leg; animation-delay: 2.38s; }
+      @keyframes fall-leg {
+        0%        { transform: translateY(0px);  opacity: 0; }
+        6%        { opacity: 1; }
+        18%       { transform: translateY(50px); opacity: 1; }
+        22%, 100% { transform: translateY(50px); opacity: 0; }
+      }
+
+      /* 4 — the claim commits: the guarded UPDATE that cannot double-sell */
+      .ring-pg { animation-name: commit; animation-delay: 2.9s; }
+      @keyframes commit {
+        0%   { r: 6px;  opacity: 0; }
+        4%   { opacity: 0.9; }
+        14%  { r: 26px; opacity: 0; }
+        100% { r: 26px; opacity: 0; }
+      }
+      .flash-pg { animation-name: flash; animation-delay: 2.9s; }
+      @keyframes flash {
+        0%, 100% { fill: var(--ink); }
+        3%, 10%  { fill: var(--commit); }
+      }
+
+      /* 5 — a signed ticket leaves for the gate… */
+      .p-ticket { animation-name: to-edge; }
+      @keyframes to-edge {
+        0%, 52%   { transform: translateY(0px);   opacity: 0; }
+        56%       { transform: translateY(0px);   opacity: 1; }
+        68%       { transform: translateY(112px); opacity: 1; }
+        72%, 100% { transform: translateY(112px); opacity: 0; }
+      }
+      /* …the link upstream drops away, which is the entire point… */
+      .link-edge { animation-name: cut; }
+      @keyframes cut {
+        0%, 70%   { opacity: 1; }
+        78%, 100% { opacity: 0; }
+      }
+      /* …and the gate keeps verifying with nothing behind it. */
+      .glow-edge { animation-name: breathe; }
+      @keyframes breathe {
+        0%, 70%  { stroke: var(--line); }
+        80%, 92% { stroke: var(--commit); }
+        100%     { stroke: var(--line); }
+      }
+    }
+  ]]></style>
+
+  <!-- The SVG paints its own background. `prefers-color-scheme` resolves
+       against the OS, but GitHub's theme is a separate setting — so a
+       reader on GitHub-light with a dark OS would otherwise get pale text
+       on a white page. With this, a mismatch is merely a card. -->
+  <rect class="page" x="0" y="0" width="760" height="560" rx="8"/>
+
+  <!-- ── client ─────────────────────────────────────────────────── -->
+  <text x="380" y="34" text-anchor="middle">Your storefront / kiosk / POS / boarding app</text>
+
+  <path class="conn" d="M380 48 V112" marker-end="url(#arrow)"/>
+  <rect class="label-bg" x="205" y="64" width="350" height="18"/>
+  <text x="380" y="77" text-anchor="middle" class="sm">JSON REST · @lulan/storefront-sdk (TS)</text>
+  <circle class="dot p-in" cx="380" cy="52" r="4"/>
+
+  <!-- ── server ─────────────────────────────────────────────────── -->
+  <rect class="box glow-api" x="200" y="112" width="360" height="54" rx="6"/>
+  <text x="380" y="136" text-anchor="middle">lulan-api</text>
+  <text x="380" y="154" text-anchor="middle" class="sm">Axum · HTTP/2</text>
+
+  <rect class="box" x="200" y="166" width="360" height="96" rx="6"/>
+  <line class="conn" x1="200" y1="166" x2="560" y2="166"/>
+  <text x="380" y="192" text-anchor="middle">lulan-engine · lulan-pricing</text>
+  <text x="380" y="214" text-anchor="middle" class="sm">inventory · orders · tickets</text>
+  <text x="380" y="232" text-anchor="middle" class="sm">signed quotes · event-sourced orders</text>
+  <text x="380" y="250" text-anchor="middle" class="sm">native + WASM sandbox (wasmtime)</text>
+
+  <!-- ── stores ─────────────────────────────────────────────────── -->
+  <path class="conn" d="M240 262 V310"/>
+  <path class="conn" d="M380 262 V310"/>
+  <path class="conn" d="M520 262 V310"/>
+
+  <circle class="dot p-pg"    cx="240" cy="264" r="4"/>
+  <circle class="dot p-redis" cx="380" cy="264" r="4"/>
+  <circle class="dot p-wasm"  cx="520" cy="264" r="4"/>
+
+  <circle class="ring ring-pg" cx="240" cy="326" r="6"/>
+  <text x="240" y="330" text-anchor="middle" class="flash-pg">PostgreSQL</text>
+  <text x="240" y="348" text-anchor="middle" class="sm">source of truth</text>
+  <text x="240" y="364" text-anchor="middle" class="sm">claims + events</text>
+
+  <text x="380" y="330" text-anchor="middle">Redis</text>
+  <text x="380" y="348" text-anchor="middle" class="sm">soft holds</text>
+  <text x="380" y="364" text-anchor="middle" class="sm">cache</text>
+
+  <text x="520" y="330" text-anchor="middle" class="wasm-text">*.wasm</text>
+  <text x="520" y="348" text-anchor="middle" class="sm">operator fares</text>
+  <text x="520" y="364" text-anchor="middle" class="sm">no host imports</text>
+
+  <!-- ── offline edge ───────────────────────────────────────────── -->
+  <path class="conn link-edge" d="M380 380 V440" stroke-dasharray="5 5"/>
+  <circle class="dot p-ticket" cx="380" cy="382" r="4"/>
+  <rect class="label-bg" x="308" y="398" width="144" height="16"/>
+  <text x="380" y="410" text-anchor="middle" class="sm">signed QR ticket</text>
+
+  <rect class="box glow-edge" x="200" y="440" width="360" height="86" rx="6" stroke-dasharray="6 4"/>
+  <text x="380" y="468" text-anchor="middle">lulan-validate (wasm32)</text>
+  <text x="380" y="490" text-anchor="middle" class="sm">Ed25519 · verifies at the gate</text>
+  <text x="380" y="508" text-anchor="middle" class="sm">with zero server dependency</text>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" class="arrowhead"/>
+    </marker>
+  </defs>
+</svg>

@@ -53,6 +53,7 @@ impl From<StoreError> for ApiError {
             StoreError::TripNotSellable { .. } | StoreError::TripDeparted { .. } => {
                 ApiError::Conflict(err.to_string())
             }
+            StoreError::UnreplayableStream { .. } => ApiError::Internal(anyhow::anyhow!("{err}")),
             StoreError::Db(db) => ApiError::Internal(db.into()),
         }
     }

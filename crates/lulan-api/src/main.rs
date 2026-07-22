@@ -3,6 +3,13 @@ use lulan_api::config::Config;
 use lulan_api::state::AppState;
 use lulan_api::{MIGRATOR, router, seed};
 use lulan_engine::payments::PaymentProvider as _;
+
+/// 32 bytes of hex is the shortest thing worth calling an HMAC key.
+const MIN_QUOTE_SECRET_LEN: usize = 32;
+
+/// Per-tick budget for the background cancellation drain. Larger than
+/// the inline batch — nobody is waiting on it.
+const SWEEP_CASCADE_LIMIT: i64 = 200;
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
@@ -86,63 +93,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Background machinery (needs a database): outbox relay fanning
-    // events into the webhook delivery queue, the delivery worker POSTing
-    // them, and the sweeper expiring unpaid orders.
-    if let Some(pool) = &db {
-        if let Ok(key) = std::env::var("LULAN_BOOTSTRAP_ADMIN_KEY") {
-            lulan_api::auth::bootstrap_admin_key(pool, &key).await?;
-            tracing::info!("bootstrap admin API key active");
-        }
-        if let Ok(spec) = std::env::var("LULAN_BOOTSTRAP_ADMIN_STAFF") {
-            lulan_api::staff::bootstrap_admin_staff(pool, &spec).await?;
-            tracing::info!("bootstrap admin staff active");
-        }
-        tokio::spawn(lulan_engine::events::run_relay(
-            pool.clone(),
-            lulan_engine::webhooks::WebhookSink::new(pool.clone()),
-            std::time::Duration::from_secs(2),
-        ));
-        tokio::spawn(lulan_engine::webhooks::run_delivery_worker(
-            pool.clone(),
-            std::time::Duration::from_secs(2),
-        ));
-        let sweeper_store = lulan_engine::orders::OrderStore::new(pool.clone());
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                ticker.tick().await;
-                match sweeper_store.expire_due().await {
-                    Ok(0) => {}
-                    Ok(n) => tracing::info!(expired = n, "expired overdue orders"),
-                    Err(err) => tracing::error!(error = %err, "order expiry sweep failed"),
-                }
-                // Reclaims keys whose booking died mid-flight, and expires
-                // stored responses past any sane retry window.
-                match sweeper_store.sweep_idempotency_keys().await {
-                    Ok(0) => {}
-                    Ok(n) => tracing::debug!(removed = n, "swept idempotency keys"),
-                    Err(err) => tracing::error!(error = %err, "idempotency sweep failed"),
-                }
-            }
-        });
-    }
-
-    // Pricing engine: an operator-supplied WASM module (the ADR 0003
-    // plugin path — a runtime artifact, not an image layer) or native.
-    let pricing: std::sync::Arc<dyn lulan_pricing::PricingEngine> = match &config.pricing_wasm {
-        Some(path) => {
-            let engine = lulan_pricing::WasmEngine::from_file(std::path::Path::new(path))?;
-            tracing::info!(module = %path, "pricing: WASM module loaded");
-            std::sync::Arc::new(engine)
-        }
-        None => {
-            tracing::info!("pricing: native rule engine");
-            std::sync::Arc::new(lulan_pricing::NativeEngine)
-        }
-    };
-
     // Payment provider: a preset name, a path to a provider description,
     // or nothing. "Nothing" is loud on purpose — the fake provider issues
     // tickets without taking money, which is a demo, not a deployment.
@@ -180,12 +130,108 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let quote_secret = std::sync::Arc::new(match &config.quote_secret {
-        Some(secret) => secret.as_bytes().to_vec(),
-        None => {
-            tracing::warn!("LULAN_QUOTE_SECRET not set — quotes won't survive restarts");
-            lulan_api::state::ephemeral_secret()
+    // This key signs quote tokens AND guest order-retrieval tokens. The
+    // second is what makes it fatal rather than a warning: retrieval
+    // tokens are long-lived magic links delivered to customers, so an
+    // ephemeral key silently breaks every guest's access to their own
+    // booking on restart, and breaks it immediately across replicas.
+    // Background machinery (needs a database): outbox relay fanning
+    // events into the webhook delivery queue, the delivery worker POSTing
+    // them, and the sweeper expiring unpaid orders.
+    if let Some(pool) = &db {
+        if let Ok(key) = std::env::var("LULAN_BOOTSTRAP_ADMIN_KEY") {
+            lulan_api::auth::bootstrap_admin_key(pool, &key).await?;
+            tracing::info!("bootstrap admin API key active");
         }
+        if let Ok(spec) = std::env::var("LULAN_BOOTSTRAP_ADMIN_STAFF") {
+            lulan_api::staff::bootstrap_admin_staff(pool, &spec).await?;
+            tracing::info!("bootstrap admin staff active");
+        }
+        tokio::spawn(lulan_engine::events::run_relay(
+            pool.clone(),
+            lulan_engine::webhooks::WebhookSink::new(pool.clone()),
+            std::time::Duration::from_secs(2),
+        ));
+        tokio::spawn(lulan_engine::webhooks::run_delivery_worker(
+            pool.clone(),
+            std::time::Duration::from_secs(2),
+        ));
+        let sweeper_store = lulan_engine::orders::OrderStore::new(pool.clone());
+        let sweeper_payments = payments.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                match sweeper_store.expire_due().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(expired = n, "expired overdue orders"),
+                    Err(err) => tracing::error!(error = %err, "order expiry sweep failed"),
+                }
+                // Reclaims keys whose booking died mid-flight, and expires
+                // stored responses past any sane retry window.
+                match sweeper_store.sweep_idempotency_keys().await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::debug!(removed = n, "swept idempotency keys"),
+                    Err(err) => tracing::error!(error = %err, "idempotency sweep failed"),
+                }
+                // Drains what a trip cancellation could not settle inline.
+                // Driven off trips.status, so it resumes across restarts
+                // and retries anything a provider refused.
+                match sweeper_store
+                    .settle_cancelled_trips(sweeper_payments.as_ref(), SWEEP_CASCADE_LIMIT)
+                    .await
+                {
+                    Ok(stats) if stats.cancelled + stats.refunded + stats.failed > 0 => {
+                        tracing::info!(
+                            cancelled = stats.cancelled,
+                            refunded = stats.refunded,
+                            failed = stats.failed,
+                            remaining = stats.remaining,
+                            "settled orders on cancelled trips"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(err) => tracing::error!(error = %err, "cancellation cascade failed"),
+                }
+            }
+        });
+    }
+
+    // Pricing engine: an operator-supplied WASM module (the ADR 0003
+    // plugin path — a runtime artifact, not an image layer) or native.
+    let pricing: std::sync::Arc<dyn lulan_pricing::PricingEngine> = match &config.pricing_wasm {
+        Some(path) => {
+            let engine = lulan_pricing::WasmEngine::from_file(std::path::Path::new(path))?;
+            tracing::info!(module = %path, "pricing: WASM module loaded");
+            std::sync::Arc::new(engine)
+        }
+        None => {
+            tracing::info!("pricing: native rule engine");
+            std::sync::Arc::new(lulan_pricing::NativeEngine)
+        }
+    };
+
+    let quote_secret = std::sync::Arc::new(match (&config.quote_secret, &db) {
+        (Some(secret), _) => {
+            if secret.len() < MIN_QUOTE_SECRET_LEN {
+                anyhow::bail!(
+                    "LULAN_QUOTE_SECRET must be at least {MIN_QUOTE_SECRET_LEN} characters \
+                     (it signs order-retrieval tokens). Generate one with: \
+                     openssl rand -hex 32"
+                );
+            }
+            secret.as_bytes().to_vec()
+        }
+        (None, Some(_)) => anyhow::bail!(
+            "LULAN_QUOTE_SECRET is required. It signs quote tokens and the retrieval \
+             tokens guests use to reach their own bookings, so a per-boot value would \
+             invalidate every outstanding magic link on restart and would not match \
+             across replicas. Generate one with: openssl rand -hex 32"
+        ),
+        // No database: an infra-less boot (health checks, CI smoke tests)
+        // where nothing durable is signed anyway.
+        (None, None) => lulan_api::state::ephemeral_secret(),
     });
 
     let ticket_signer = match &db {

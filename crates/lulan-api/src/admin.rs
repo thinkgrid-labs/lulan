@@ -25,6 +25,11 @@ fn db(state: &AppState) -> Result<&PgPool, ApiError> {
         .ok_or(ApiError::ServiceUnavailable("database not configured"))
 }
 
+/// How many orders a cancellation request settles before handing the
+/// rest to the background drain. Small enough to keep the request
+/// snappy, large enough that a typical trip finishes inline.
+const INLINE_CASCADE_LIMIT: i64 = 25;
+
 fn actor(staff_id: Uuid) -> Actor {
     Actor {
         api_key_id: None,
@@ -197,8 +202,12 @@ pub async fn list_fare_rules(
     _ops: OpsStaff,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let pool = db(&state)?;
+    // Active first, then newest. Ordering by date alone hid the live
+    // ruleset once an operator had published more than a page of them —
+    // the one row this list exists to show.
     let rows = sqlx::query(
-        "SELECT id, active, created_at FROM fare_rules ORDER BY created_at DESC LIMIT 20",
+        "SELECT id, active, created_at FROM fare_rules
+         ORDER BY active DESC, created_at DESC LIMIT 20",
     )
     .fetch_all(pool)
     .await
@@ -649,7 +658,17 @@ pub async fn create_trips(
 /// POST /v1/admin/trips/{id}/cancel (ops) — cancel the departure and
 /// cascade: unpaid orders are cancelled, paid/ticketed orders refunded
 /// (provider refund + seats released + tickets voided). Webhooks fire via
-/// the ordinary event pipeline.
+/// POST /v1/admin/trips/{id}/cancel
+///
+/// Cancelling the trip is immediate and authoritative — it stops the
+/// departure being sold the moment this returns. Settling the orders on it
+/// is not done here beyond a first bounded batch: a full sailing can be
+/// hundreds of orders, each needing a provider round-trip, which would turn
+/// one request into a multi-minute transaction that fails halfway.
+///
+/// The rest drains in the background off `trips.status`, so the work is
+/// durable and resumable rather than tied to this connection. `remaining`
+/// says how much is still outstanding.
 pub async fn cancel_trip(
     State(state): State<AppState>,
     ops: OpsStaff,
@@ -669,66 +688,24 @@ pub async fn cancel_trip(
         )));
     }
 
-    // Affected orders: anything holding capacity on this trip.
-    let rows = sqlx::query(
-        "SELECT DISTINCT o.id, o.status, o.payment_intent_id, o.total_minor
-         FROM orders o JOIN order_items oi ON oi.order_id = o.id
-         WHERE oi.trip_id = $1
-           AND o.status IN ('locked', 'pending_payment', 'paid', 'ticketed')",
-    )
-    .bind(trip_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| ApiError::Internal(e.into()))?;
-
-    let store = OrderStore::new(pool.clone());
-    let provider = state.payments.clone();
-    let (mut cancelled, mut refunded, mut failures) = (0, 0, 0);
-    for row in &rows {
-        let order_id: Uuid = row.get("id");
-        let status: String = row.get("status");
-        let outcome = match status.as_str() {
-            "locked" | "pending_payment" => store.cancel(order_id).await,
-            _ => {
-                // Money back first; only then release inventory.
-                let intent: Option<String> = row.get("payment_intent_id");
-                let total: i64 = row.get("total_minor");
-                if let Some(intent) = intent
-                    && let Err(err) = provider.refund(&intent, total).await
-                {
-                    tracing::error!(%order_id, error = %err, "provider refund failed");
-                    failures += 1;
-                    continue;
-                }
-                store.refund(order_id).await
-            }
-        };
-        match outcome {
-            Ok(TransitionOutcome::Applied(lulan_engine::domain::OrderStatus::Cancelled)) => {
-                cancelled += 1;
-            }
-            Ok(TransitionOutcome::Applied(_)) => refunded += 1,
-            Ok(_) => {}
-            Err(err) => {
-                tracing::error!(%order_id, error = %err, "cascade failed");
-                failures += 1;
-            }
-        }
-    }
+    let stats = OrderStore::new(pool.clone())
+        .settle_cancelled_trips(state.payments.as_ref(), INLINE_CASCADE_LIMIT)
+        .await?;
 
     audit(
         pool,
         actor(ops.0.staff_id),
         "trip.cancelled",
-        json!({ "trip_id": trip_id, "cancelled": cancelled, "refunded": refunded, "failures": failures }),
+        json!({ "trip_id": trip_id, "settled": stats }),
     )
     .await
     .map_err(|e| ApiError::Internal(e.into()))?;
     Ok(Json(json!({
         "trip_id": trip_id,
-        "orders_cancelled": cancelled,
-        "orders_refunded": refunded,
-        "failures": failures,
+        "orders_cancelled": stats.cancelled,
+        "orders_refunded": stats.refunded,
+        "failures": stats.failed,
+        "remaining": stats.remaining,
     })))
 }
 

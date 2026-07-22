@@ -195,7 +195,8 @@ pub struct IssuedTicket {
 #[derive(Debug, Serialize)]
 pub struct ScanOutcome {
     pub ticket_id: Uuid,
-    /// `boarded` | `already_boarded` | `duplicate_scan` | `unknown_ticket`
+    /// `boarded` | `already_boarded` | `void` | `duplicate_scan` |
+    /// `unknown_ticket`
     pub status: &'static str,
     pub order_status: Option<String>,
 }
@@ -412,12 +413,20 @@ impl TicketStore {
         }
 
         if ticket_status != "issued" {
-            // A *different* scan of an already-boarded ticket — the cloned
-            // QR case. The journal row above is the post-hoc evidence.
+            // Not boardable — but WHY matters at the gate, and these used
+            // to be indistinguishable. A refunded ticket reported
+            // "already_boarded", telling crew they were looking at a
+            // duplicate scan when they were looking at a cancelled sale.
+            // The journal row above is the post-hoc evidence either way.
+            let status = match ticket_status.as_str() {
+                "boarded" => "already_boarded",
+                "void" => "void",
+                _ => "not_boardable",
+            };
             tx.commit().await?;
             return Ok(ScanOutcome {
                 ticket_id,
-                status: "already_boarded",
+                status,
                 order_status: None,
             });
         }

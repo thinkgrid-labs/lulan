@@ -9,6 +9,10 @@ image:
 # Either put URLs here (templated into a Secret), or set
 # existingSecret to a Secret exposing DATABASE_URL / REDIS_URL /
 # LULAN_QUOTE_SECRET / LULAN_BOOTSTRAP_ADMIN_KEY keys.
+# LULAN_QUOTE_SECRET is REQUIRED (>= 32 chars) and must be identical on
+# every replica: it signs the retrieval tokens guests use to reach their
+# own bookings, so a per-pod value would break those links. The server
+# refuses to start without it. Generate: openssl rand -hex 32
 database:
   url: ""            # postgres://user:pass@host:5432/lulan
 redis:

@@ -243,6 +243,11 @@ publishes a ruleset per currency.
 
 ## Architecture
 
+![Lulan architecture: a booking request flows from your storefront over JSON REST into lulan-api (Axum, HTTP/2), through lulan-engine and lulan-pricing, out to PostgreSQL (source of truth, claims and events), Redis (soft holds, cache) and operator-supplied .wasm fare modules; a signed QR ticket then leaves for the gate, where lulan-validate (wasm32) verifies it with zero server dependency.](assets/architecture.svg)
+
+<details>
+<summary>Same diagram as text</summary>
+
 ```
         Your storefront / kiosk / POS / boarding app
                           │
@@ -262,6 +267,8 @@ publishes a ruleset per currency.
    Offline edge:  lulan-validate (wasm32) verifies tickets
                   with zero server dependency.
 ```
+
+</details>
 
 ## Benchmarks
 

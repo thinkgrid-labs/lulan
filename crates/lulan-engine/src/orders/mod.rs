@@ -161,6 +161,19 @@ pub enum CreateOutcome {
     Invalid(ItemValidation),
 }
 
+/// What one pass of the cancellation cascade did, and how much is left.
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct CascadeStats {
+    pub cancelled: usize,
+    pub refunded: usize,
+    /// Orders whose refund or transition failed. They stay selected and
+    /// are retried by the next pass — nothing is lost, nothing is freed.
+    pub failed: usize,
+    /// Orders still awaiting settlement after this pass, across every
+    /// cancelled trip.
+    pub remaining: i64,
+}
+
 /// Result of a lifecycle transition.
 #[derive(Debug, PartialEq, Eq)]
 pub enum TransitionOutcome {
@@ -188,7 +201,6 @@ impl OrderStore {
     /// trips): passengers + claims + order row + OrderCreated/
     /// InventoryLocked events, atomically. A claim conflict on ANY leg
     /// rolls back every claim on every leg.
-    ///
     pub async fn create(&self, order: NewOrder<'_>) -> Result<CreateOutcome, StoreError> {
         let NewOrder {
             passengers,
@@ -627,6 +639,80 @@ impl OrderStore {
         Ok(removed)
     }
 
+    /// Settle orders still holding capacity on a cancelled trip: unpaid
+    /// ones are cancelled, paid ones refunded through the provider before
+    /// their seats are released.
+    ///
+    /// Driven off `trips.status = 'cancelled'`, which is the durable
+    /// marker — so this is resumable and idempotent, and a batch that
+    /// fails part-way is simply retried on the next pass. Bounded by
+    /// `limit`: cancelling a full sailing can mean hundreds of provider
+    /// round-trips, which is not work an HTTP request should be doing.
+    pub async fn settle_cancelled_trips(
+        &self,
+        provider: &dyn crate::payments::PaymentProvider,
+        limit: i64,
+    ) -> Result<CascadeStats, StoreError> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT o.id, o.status, o.payment_intent_id, o.total_minor
+             FROM orders o
+             JOIN order_items oi ON oi.order_id = o.id
+             JOIN trips t ON t.id = oi.trip_id
+             WHERE t.status = 'cancelled'
+               AND o.status IN ('locked', 'pending_payment', 'paid', 'ticketed')
+             ORDER BY o.id
+             LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut stats = CascadeStats::default();
+        for row in &rows {
+            let order_id: Uuid = row.try_get("id")?;
+            let status: String = row.try_get("status")?;
+            let outcome = match status.as_str() {
+                "locked" | "pending_payment" => self.cancel(order_id).await,
+                _ => {
+                    // Money first, inventory second. A refund that did not
+                    // happen must not free the seat, so we leave the order
+                    // alone and let the next pass try again.
+                    let intent: Option<String> = row.try_get("payment_intent_id")?;
+                    let total: i64 = row.try_get("total_minor")?;
+                    if let Some(intent) = intent
+                        && let Err(err) = provider.refund(&intent, total).await
+                    {
+                        tracing::error!(%order_id, error = %err, "refund failed; will retry");
+                        stats.failed += 1;
+                        continue;
+                    }
+                    self.refund(order_id).await
+                }
+            };
+            match outcome {
+                Ok(TransitionOutcome::Applied(OrderStatus::Cancelled)) => stats.cancelled += 1,
+                Ok(TransitionOutcome::Applied(_)) => stats.refunded += 1,
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::error!(%order_id, error = %err, "cancellation cascade failed");
+                    stats.failed += 1;
+                }
+            }
+        }
+
+        stats.remaining = sqlx::query_scalar::<_, i64>(
+            "SELECT count(DISTINCT o.id)
+             FROM orders o
+             JOIN order_items oi ON oi.order_id = o.id
+             JOIN trips t ON t.id = oi.trip_id
+             WHERE t.status = 'cancelled'
+               AND o.status IN ('locked', 'pending_payment', 'paid', 'ticketed')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(stats)
+    }
+
     /// One lifecycle step under the order row lock: check legality via the
     /// pure state machine, update the read model, append exactly one event.
     /// Paid/Ticketed → Refunded: releases every claim on every leg and
@@ -784,14 +870,20 @@ impl OrderStore {
         }
         let mut state: Option<OrderStatus> = None;
         for event in &stream {
-            let event_type = OrderEventType::parse(&event.event_type)
-                .unwrap_or_else(|| panic!("unknown event type {:?} in stream", event.event_type));
-            state = Some(apply(state, event_type).unwrap_or_else(|e| {
-                panic!(
-                    "stored stream must replay cleanly, got {e} at seq {}",
-                    event.stream_seq
-                )
-            }));
+            let event_type = OrderEventType::parse(&event.event_type).ok_or_else(|| {
+                StoreError::UnreplayableStream {
+                    stream_id: order_id,
+                    stream_seq: event.stream_seq,
+                    detail: format!("unknown event type {:?}", event.event_type),
+                }
+            })?;
+            state = Some(
+                apply(state, event_type).map_err(|e| StoreError::UnreplayableStream {
+                    stream_id: order_id,
+                    stream_seq: event.stream_seq,
+                    detail: e.to_string(),
+                })?,
+            );
         }
         Ok(state)
     }

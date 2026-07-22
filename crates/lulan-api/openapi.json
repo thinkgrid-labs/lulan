@@ -1566,7 +1566,7 @@
         ],
         "responses": {
           "200": {
-            "description": "OK"
+            "description": "Trip cancelled; counts for what this call settled plus `remaining`"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1585,7 +1585,8 @@
               "format": "uuid"
             }
           }
-        ]
+        ],
+        "description": "Cancelling the trip is immediate: it stops being sold the moment this returns. Settling the orders on it happens beyond a first bounded batch in the background, driven off the trip's cancelled status, so a full sailing does not turn one request into hundreds of provider round-trips. `remaining` reports how many orders are still awaiting settlement; a failed refund never releases the seat and is retried."
       }
     },
     "/v1/admin/trips/{id}/manifest": {
