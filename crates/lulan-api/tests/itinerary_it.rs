@@ -310,7 +310,7 @@ async fn round_trip_multi_city_and_cross_leg_atomicity() {
     let (_, hook) = call_keyed(
         &app,
         "POST",
-        "/v1/payments/fake/webhook",
+        "/v1/payments/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
         Some(API_KEY),
     )

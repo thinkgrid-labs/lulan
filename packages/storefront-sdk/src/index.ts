@@ -247,6 +247,14 @@ export interface PaymentResponse {
   order_id: string;
   status: OrderStatus;
   payment_intent_id: string;
+  /**
+   * Client-side confirmation token, when the configured provider uses one
+   * (Stripe calls it `client_secret`). Hand it to the provider's browser
+   * SDK to collect card details — it is not a server credential.
+   */
+  client_secret?: string;
+  /** Which adapter minted the intent, so you know whose SDK to load. */
+  provider: string;
 }
 
 export interface Ticket {

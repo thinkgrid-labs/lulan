@@ -101,7 +101,7 @@ curl -X POST localhost:8080/v1/quotes -H 'content-type: application/json' -d '{
 #    credential. Capture is server-to-server: integration key required.
 curl -X POST localhost:8080/v1/orders ...
 curl -X POST "localhost:8080/v1/orders/<id>/payment?token=<retrieval_token>"
-curl -X POST localhost:8080/v1/payments/fake/webhook \
+curl -X POST localhost:8080/v1/payments/webhook \
   -H "x-api-key: $LULAN_BOOTSTRAP_ADMIN_KEY" -H 'content-type: application/json' \
   -d '{"payment_intent_id": "<intent>", "status": "succeeded"}'
 curl "localhost:8080/v1/orders/<id>/tickets?token=<retrieval_token>"
@@ -127,7 +127,7 @@ just loadgen-paced 200 30  # open-loop 200 req/s — honest seat-lock latencies
 | `POST /v1/orders` | Atomic multi-passenger booking (live-priced or quote-token) |
 | `POST /v1/orders/{id}/payment` | Create payment intent (provider port) — order credential required |
 | `POST /v1/orders/{id}/cancel` | Cancel and release claims — order credential required |
-| `POST /v1/payments/fake/webhook` | Idempotent capture webhook → auto-issues tickets (integration key) |
+| `POST /v1/payments/webhook` | Provider capture callback → auto-issues tickets (signature-authenticated, or integration key for unsigned providers) |
 | `GET /v1/orders/{id}/tickets` | Ed25519-signed QR ticket tokens |
 | `GET /v1/ticket-keys` | Public keys for offline validators |
 | `POST /v1/scans` | Batched, idempotent boarding-scan sync (validator key) |
@@ -179,30 +179,50 @@ LULAN_BOOTSTRAP_ADMIN_STAFF='https://auth.example.com|user-id-of-admin'
 | Walk-up / kiosk sales, no accounts at all | Skip the IdP entirely: **guest checkout** is first-class — `guest_contact` + an HMAC retrieval token (magic link) per order |
 | Back-office staff signing into the admin app | Same IdP login; an admin enrols their identity via `POST /v1/admin/staff` with a role — every action they take is audited by name |
 
-### Payment provider — charge and refund
+### Payment provider — configuration, not code
 
-The engine reconciles provider webhooks against the order state machine;
-the provider port is two calls:
+Most payment APIs are the same three shapes wearing different names: POST
+somewhere to create an intent, POST somewhere to refund it, receive an
+HMAC-signed callback. So a provider is **described**, not implemented — a
+JSON file, no Rust, no rebuild, no fork. The same idea as pricing modules:
+a runtime artifact the operator supplies.
 
-```rust
-pub trait PaymentProvider {
-    /// Charge amount_minor for an order → provider intent (e.g. pi_…).
-    async fn create_intent(&self, order_id, amount_minor, currency) -> PaymentIntent;
-    /// Full refund of a captured intent (admin refunds, trip cancellation).
-    async fn refund(&self, payment_intent_id, amount_minor) -> Result<()>;
-}
+```bash
+# A built-in preset — this is the entire Stripe integration
+LULAN_PAYMENT_PROVIDER=stripe
+LULAN_PAYMENT_SECRET=sk_live_…
+LULAN_PAYMENT_WEBHOOK_SECRET=whsec_…
+
+# Anything else — describe it once
+LULAN_PAYMENT_PROVIDER=/etc/lulan/my-psp.json
 ```
 
-Ships today: `FakeProvider` (drives dev, tests, and every demo — including
-the async webhook flow, exactly like a real provider). Real adapters are
-adapter-sized work, not engine work:
+A description says where to POST, how to authenticate (bearer / basic /
+custom header), whether bodies are JSON or form-encoded, which JSON
+pointers hold the intent id and client secret, and how callbacks are
+signed (SHA-256/512, hex/base64, raw or Stripe-style headers, replay
+tolerance) — plus which of the provider's event names mean *captured* and
+*failed*. Fully commented starter:
+[`deploy/payment-providers/example.json`](deploy/payment-providers/example.json).
+Stripe ships as a preset specifically to prove the description handles a
+real, large PSP rather than a toy.
 
 | Use case | How it maps |
 |---|---|
-| Global card payments (**Stripe**) | `create_intent` → PaymentIntent; Stripe's `payment_intent.succeeded` webhook hits Lulan's capture endpoint → order Paid → tickets auto-issue |
-| PH market e-wallets — GCash/Maya via **Xendit or PayMongo** | Same flow; the intent id is the provider's charge/checkout id |
+| Global card payments (**Stripe**) | Built-in preset; supply two secrets. `payment_intent.succeeded` → order Paid → tickets auto-issue |
+| PH e-wallets — GCash/Maya via **PayMongo or Xendit** | A description file: different URLs, JSON bodies, a raw signature header. No engine change |
+| A bank gateway nobody has heard of | Same file. If its callbacks are unsigned, Lulan requires an integration API key on the webhook endpoint instead of trusting an open one |
+| Something genuinely stranger (SOAP, an SDK, a redirect flow) | Implement the `PaymentProvider` trait in Rust — the escape hatch, not the expected path |
 | Cash at a counter / agent network | A trusted `integration` API key confirms payment through the same webhook path — the state machine doesn't care who captured |
 | Trip cancelled by ops, or support refunds a booking | Lulan calls `refund()` **before** releasing seats and voiding tickets — money moves first, inventory second |
+
+Whatever the provider, the engine only ever sees *captured* or *failed*:
+adapters translate, and an adapter cannot report an event it has not
+authenticated. Verification and interpretation live in the same call on
+purpose.
+
+**With no provider configured** Lulan runs `FakeProvider`, which captures
+payment without taking money. That is a demo, and it says so at boot.
 
 Payment capture is idempotent (duplicate and out-of-order webhooks are
 acknowledged, never re-applied), and `Idempotency-Key` on order creation
@@ -253,7 +273,7 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 
 - [x] Segment-aware inventory engine (seats, pools, span claims)
 - [x] Soft holds + race-free claims (0 double-sells @ 10k contenders)
-- [x] Event-sourced order lifecycle with payment-provider port
+- [x] Event-sourced order lifecycle with a configuration-driven payment-provider port (Stripe preset built in)
 - [x] Pricing engine — native + sandboxed WASM modules, signed quotes
 - [x] Multi-passenger orders with passenger-type fares
 - [x] Ed25519 QR ticketing + offline validation (`lulan-validate`)

@@ -164,7 +164,7 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     let (status, _) = call_with_key(
         &app,
         "POST",
-        "/v1/payments/fake/webhook",
+        "/v1/payments/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
         Some(DEVICE_KEY),
     )
@@ -173,7 +173,7 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     let (_, hook) = call_with_key(
         &app,
         "POST",
-        "/v1/payments/fake/webhook",
+        "/v1/payments/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
         Some(INTEGRATION_KEY),
     )

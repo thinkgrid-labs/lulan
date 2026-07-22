@@ -16,6 +16,10 @@ pub struct Config {
     /// HMAC key for quote tokens. Env: `LULAN_QUOTE_SECRET`. Unset = a
     /// random per-boot secret (quotes won't survive restarts).
     pub quote_secret: Option<String>,
+    /// Payment provider: a built-in preset name (`stripe`) or a path to a
+    /// provider description. Env: `LULAN_PAYMENT_PROVIDER`. Unset = the
+    /// fake provider, which takes no money.
+    pub payment_provider: Option<String>,
 }
 
 impl Config {
@@ -27,6 +31,7 @@ impl Config {
             redis_url: std::env::var("REDIS_URL").ok(),
             pricing_wasm: std::env::var("LULAN_PRICING_WASM").ok(),
             quote_secret: std::env::var("LULAN_QUOTE_SECRET").ok(),
+            payment_provider: std::env::var("LULAN_PAYMENT_PROVIDER").ok(),
         }
     }
 }

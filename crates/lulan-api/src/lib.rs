@@ -60,7 +60,7 @@ pub fn router(state: AppState) -> Router {
             post(orders::request_payment),
         )
         .route("/v1/orders/{order_id}/cancel", post(orders::cancel))
-        .route("/v1/payments/fake/webhook", post(orders::fake_webhook))
+        .route("/v1/payments/webhook", post(orders::payment_webhook))
         .route(
             "/v1/orders/{order_id}/tickets",
             post(tickets::issue).get(tickets::list),

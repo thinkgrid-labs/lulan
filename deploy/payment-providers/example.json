@@ -1,0 +1,96 @@
+{
+  "//": [
+    "A payment provider, described rather than coded. Point",
+    "LULAN_PAYMENT_PROVIDER at this file to use it. Secrets are NEVER in",
+    "here: fields name environment variables and the values are read from",
+    "the process environment.",
+    "",
+    "Placeholders available in field templates: {order_id},",
+    "{amount_minor}, {currency}, {currency_lower}, {currency_upper},",
+    "{payment_intent_id}.",
+    "",
+    "Built-in presets need none of this — LULAN_PAYMENT_PROVIDER=stripe",
+    "plus the two secrets is a complete integration. Copy this file when",
+    "your provider is not one of them."
+  ],
+
+  "name": "acme-pay",
+  "base_url": "https://api.acme-pay.example",
+
+  "//auth": "bearer | basic | header | none. Secrets come from env.",
+  "auth": { "type": "bearer", "token_env": "LULAN_PAYMENT_SECRET" },
+
+  "//encoding": "json (default) or form, for the request bodies below.",
+  "encoding": "json",
+
+  "//timeout_seconds": "Per-call timeout. Default 20.",
+  "timeout_seconds": 20,
+
+  "create_intent": {
+    "path": "/v1/charges",
+    "//fields": [
+      "Dotted keys nest in JSON mode. A value that is exactly",
+      "{amount_minor} is sent as a number; everything else as a string."
+    ],
+    "fields": {
+      "amount": "{amount_minor}",
+      "currency": "{currency_upper}",
+      "reference": "{order_id}",
+      "metadata.order_id": "{order_id}"
+    },
+    "//pointers": "RFC 6901 pointers into the provider's response.",
+    "intent_id_pointer": "/data/id",
+    "client_secret_pointer": "/data/checkout_token",
+    "//idempotency_header": "Optional: the order id is sent here so the PSP dedupes our retries.",
+    "idempotency_header": "Idempotency-Key"
+  },
+
+  "refund": {
+    "path": "/v1/refunds",
+    "fields": {
+      "charge_id": "{payment_intent_id}",
+      "amount": "{amount_minor}"
+    }
+  },
+
+  "webhook": {
+    "//": [
+      "Omit signature_header entirely if the provider does not sign its",
+      "callbacks — Lulan then requires an integration API key on the",
+      "webhook endpoint instead, rather than trusting an open one."
+    ],
+    "signature_header": "x-acme-signature",
+
+    "//header_format": [
+      "raw       — the header value IS the digest (most providers).",
+      "key_value — comma-separated k=v pairs, Stripe-style. Several",
+      "            signature entries may appear during key rotation; any",
+      "            valid one is accepted."
+    ],
+    "header_format": { "type": "raw" },
+
+    "secret_env": "LULAN_PAYMENT_WEBHOOK_SECRET",
+
+    "//signed_payload": "What the HMAC covers. {body} and {timestamp}.",
+    "signed_payload": "{body}",
+
+    "digest": "sha256",
+    "encoding": "hex",
+
+    "//tolerance_seconds": [
+      "Reject signatures older than this when a timestamp is available,",
+      "so a captured callback cannot be replayed forever. 0 disables it;",
+      "only meaningful with a header format that carries a timestamp."
+    ],
+    "tolerance_seconds": 300,
+
+    "//events": [
+      "Everything authentic but unlisted is acknowledged with 200 and",
+      "ignored, so the provider stops retrying without moving the order."
+    ],
+    "event_type_pointer": "/type",
+    "intent_id_pointer": "/data/id",
+    "captured_events": ["charge.succeeded", "charge.captured"],
+    "failed_events": ["charge.failed", "charge.expired"]
+  }
+}

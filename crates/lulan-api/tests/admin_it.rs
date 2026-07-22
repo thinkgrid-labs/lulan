@@ -397,7 +397,7 @@ async fn admin_operations_run_the_business_with_only_idp_tokens() {
     let (_, hook) = call(
         &app,
         "POST",
-        "/v1/payments/fake/webhook",
+        "/v1/payments/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
         Some(API_KEY),
     )
@@ -508,7 +508,7 @@ async fn admin_operations_run_the_business_with_only_idp_tokens() {
     call(
         &app,
         "POST",
-        "/v1/payments/fake/webhook",
+        "/v1/payments/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
         Some(API_KEY),
     )

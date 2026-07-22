@@ -12,7 +12,6 @@ use lulan_engine::orders::{
     CreateOutcome, ItemValidation, NewOrderAncillary, NewOrderItem, NewPassenger, OrderRecord,
     TransitionOutcome,
 };
-use lulan_engine::payments::{FakeProvider, PaymentProvider};
 use lulan_engine::ticket::TicketStore;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -595,12 +594,20 @@ pub struct PaymentResponse {
     order_id: Uuid,
     status: OrderStatus,
     payment_intent_id: String,
+    /// Present when the provider uses a client-side confirmation token
+    /// (Stripe's `client_secret`): hand it to the payment SDK in the
+    /// browser to collect card details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_secret: Option<String>,
+    /// Which adapter minted the intent — the storefront needs to know
+    /// whose SDK to load.
+    provider: &'static str,
 }
 
 /// POST /v1/orders/{order_id}/payment — Locked → PendingPayment via the
-/// configured provider (FakeProvider until a real adapter lands). Gated
-/// like the order itself: the intent id it returns is what captures the
-/// payment, so it must not be mintable by anyone holding the order id.
+/// configured provider. Gated like the order itself: the intent id it
+/// returns is what captures the payment, so it must not be mintable by
+/// anyone holding the order id.
 pub async fn request_payment(
     State(state): State<AppState>,
     Path(order_id): Path<Uuid>,
@@ -614,17 +621,19 @@ pub async fn request_payment(
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("order {order_id} not found")))?;
 
-    let provider = FakeProvider;
-    let intent = provider
+    let intent = state
+        .payments
         .create_intent(order_id, record.total_minor, &record.currency)
         .await
-        .map_err(|e| ApiError::Internal(e.into()))?;
+        .map_err(payment_error)?;
 
     match orders.request_payment(order_id, &intent.id).await? {
         TransitionOutcome::Applied(status) => Ok(Json(PaymentResponse {
             order_id,
             status,
             payment_intent_id: intent.id,
+            client_secret: intent.client_secret,
+            provider: state.payments.name(),
         })),
         TransitionOutcome::NoOp(current) => Err(ApiError::Conflict(format!(
             "payment cannot be requested in state {:?}",
@@ -636,62 +645,92 @@ pub async fn request_payment(
     }
 }
 
-#[derive(Deserialize)]
-pub struct FakeWebhookRequest {
-    payment_intent_id: String,
-    /// `succeeded` or `failed` — mirrors real provider webhook vocabulary.
-    status: String,
+/// A provider saying "declined" is the customer's problem to fix (402-ish,
+/// surfaced as 409 so it joins the other "this order cannot proceed"
+/// answers); a provider being unreachable is ours.
+pub(crate) fn payment_error(err: lulan_engine::payments::PaymentError) -> ApiError {
+    use lulan_engine::payments::PaymentError as E;
+    match err {
+        E::Rejected(message) => ApiError::Conflict(format!("payment provider declined: {message}")),
+        E::Unavailable(_) => {
+            tracing::error!(error = %err, "payment provider unavailable");
+            ApiError::ServiceUnavailable("payment provider is unavailable — try again shortly")
+        }
+        E::BadSignature => ApiError::Unauthorized("callback signature is missing or invalid"),
+        E::Malformed(message) => ApiError::BadRequest(format!("callback payload: {message}")),
+    }
 }
 
 #[derive(Serialize)]
 pub struct WebhookResponse {
-    order_status: OrderStatus,
-    /// False when the delivery was a duplicate or out of order — the call
-    /// still returns 200 so providers stop retrying (idempotency).
+    order_status: Option<OrderStatus>,
+    /// False when the delivery was a duplicate, out of order, or simply
+    /// not about the order lifecycle — the call still returns 200 so
+    /// providers stop retrying (idempotency).
     applied: bool,
 }
 
-/// POST /v1/payments/fake/webhook — the FakeProvider's async notification.
-/// A successful capture auto-issues tickets (best-effort: the order stays
+/// POST /v1/payments/webhook — the configured provider's async
+/// notification. Capture auto-issues tickets (best-effort: the order stays
 /// Paid and re-issuable if ticketing hiccups).
 ///
-/// Requires an `integration` or `operator_admin` key. This endpoint turns
-/// an order into a boarding pass, so it needs the same trust as the
-/// counter-payment path it stands in for: a real provider authenticates
-/// with a signed callback, and until such an adapter exists that trust is
-/// carried by the API key. Anonymous access here is free travel.
-pub async fn fake_webhook(
+/// Authentication depends on the provider, because it has to: a real PSP
+/// signs its callbacks and cannot be made to send an API key, so the
+/// signature IS the credential. A provider that does not sign (the fake
+/// one) gets an integration key requirement instead — this endpoint turns
+/// an order into a boarding pass, and must never be open.
+pub async fn payment_webhook(
     State(state): State<AppState>,
-    _auth: crate::auth::IntegrationAuth,
-    Json(req): Json<FakeWebhookRequest>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Json<WebhookResponse>, ApiError> {
-    let succeeded = match req.status.as_str() {
-        "succeeded" => true,
-        "failed" => false,
-        other => {
-            return Err(ApiError::BadRequest(format!(
-                "unknown payment status {other:?}"
-            )));
+    let provider = state.payments.clone();
+
+    let signature = provider
+        .authenticates_callbacks()
+        .then(|| signature_header(&headers))
+        .flatten();
+    if !provider.authenticates_callbacks() {
+        crate::auth::require_integration(&state, &headers).await?;
+    }
+
+    let event = provider
+        .verify_callback(signature.as_deref(), &body)
+        .map_err(payment_error)?;
+
+    let (payment_intent_id, succeeded) = match event {
+        lulan_engine::payments::PaymentEvent::Captured { payment_intent_id } => {
+            (payment_intent_id, true)
+        }
+        lulan_engine::payments::PaymentEvent::Failed { payment_intent_id } => {
+            (payment_intent_id, false)
+        }
+        // Authentic, but not about the order lifecycle. Acknowledge it.
+        lulan_engine::payments::PaymentEvent::Ignored => {
+            return Ok(Json(WebhookResponse {
+                order_status: None,
+                applied: false,
+            }));
         }
     };
+
     let orders = state.orders()?;
     let outcome = orders
-        .apply_payment_result(&req.payment_intent_id, succeeded)
+        .apply_payment_result(&payment_intent_id, succeeded)
         .await?;
 
     let mut order_status = match &outcome {
         TransitionOutcome::Applied(status) | TransitionOutcome::NoOp(status) => *status,
         TransitionOutcome::NotFound => {
             return Err(ApiError::NotFound(format!(
-                "no order for payment intent {:?}",
-                req.payment_intent_id
+                "no order for payment intent {payment_intent_id:?}"
             )));
         }
     };
 
     if matches!(outcome, TransitionOutcome::Applied(OrderStatus::Paid))
         && let (Some(pool), Some(signer)) = (&state.db, &state.ticket_signer)
-        && let Some(order_id) = orders.find_by_intent(&req.payment_intent_id).await?
+        && let Some(order_id) = orders.find_by_intent(&payment_intent_id).await?
     {
         match TicketStore::new(pool.clone())
             .issue_for_order(order_id, signer)
@@ -708,9 +747,24 @@ pub async fn fake_webhook(
     }
 
     Ok(Json(WebhookResponse {
-        order_status,
+        order_status: Some(order_status),
         applied: matches!(outcome, TransitionOutcome::Applied(_)),
     }))
+}
+
+/// Providers name their signature header differently; we do not know which
+/// one the configured adapter wants, so any of the usual suspects is
+/// offered and the adapter decides. The signature is verified against the
+/// body regardless, so an attacker gains nothing by picking a header.
+fn signature_header(headers: &HeaderMap) -> Option<String> {
+    headers
+        .iter()
+        .find(|(name, _)| {
+            let name = name.as_str();
+            name.ends_with("-signature") || name.ends_with("-sign") || name == "signature"
+        })
+        .and_then(|(_, value)| value.to_str().ok())
+        .map(str::to_string)
 }
 
 #[derive(Serialize)]

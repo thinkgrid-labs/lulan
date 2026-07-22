@@ -184,6 +184,34 @@ impl FromRequestParts<AppState> for IntegrationAuth {
     }
 }
 
+/// The same check as [`IntegrationAuth`], callable from a handler that has
+/// already consumed the body (so it cannot use an extractor) or that only
+/// requires the credential conditionally — the payment webhook does both.
+pub async fn require_integration(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<ApiKeyAuth, ApiError> {
+    let pool = state
+        .db
+        .as_ref()
+        .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
+    let key = headers
+        .get("x-api-key")
+        .or_else(|| headers.get("authorization"))
+        .and_then(|v| v.to_str().ok())
+        .map(|raw| raw.strip_prefix("Bearer ").unwrap_or(raw))
+        .filter(|key| key.starts_with("llk_"))
+        .ok_or(ApiError::Unauthorized("API key required (X-Api-Key)"))?;
+    let auth = authenticate(pool, key)
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?
+        .ok_or(ApiError::Unauthorized("unknown or inactive API key"))?;
+    if !matches!(auth.role, ApiRole::Integration | ApiRole::OperatorAdmin) {
+        return Err(ApiError::Forbidden("integration role required"));
+    }
+    Ok(auth)
+}
+
 /// Extractor for boarding devices: `validator` or `operator_admin`.
 pub struct DeviceAuth(pub ApiKeyAuth);
 

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use lulan_engine::inventory::{HoldStore, InventoryStore};
 use lulan_engine::orders::OrderStore;
+use lulan_engine::payments::{FakeProvider, PaymentProvider};
 use lulan_pricing::{NativeEngine, PricingEngine};
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
@@ -20,6 +21,10 @@ pub struct AppState {
     /// The active pricing engine — native by default, an operator WASM
     /// module when `LULAN_PRICING_WASM` is set (ADR 0003).
     pub pricing: Arc<dyn PricingEngine>,
+    /// The active payment provider (ADR-style port): a configured PSP, or
+    /// FakeProvider when none is set. Never constructed inline by a
+    /// handler — the running adapter is deployment configuration.
+    pub payments: Arc<dyn PaymentProvider>,
     /// HMAC key for quote tokens.
     pub quote_secret: Arc<Vec<u8>>,
     /// Ed25519 ticket signer, loaded/created at boot when a database is
@@ -52,6 +57,7 @@ impl AppState {
             db,
             redis,
             pricing: Arc::new(NativeEngine),
+            payments: Arc::new(FakeProvider),
             quote_secret: Arc::new(ephemeral_secret()),
             ticket_signer,
             identity,

@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Lulan API",
-    "description": "Open-source headless reservation engine for transit: segment-aware inventory, race-free booking, itineraries (one-way, round-trip, multi-city), signed quotes, per-passenger Ed25519 QR tickets with offline validation, webhooks, and API-key auth.\n\nAuthentication: storefront endpoints (search, quotes, orders) work unauthenticated with guest checkout (`guest_contact` + retrieval token) or with a customer JWT (`Authorization: Bearer <jwt>`, operator IdP). Server-to-server endpoints take an API key via `X-Api-Key` — roles: `operator_admin` (webhooks/keys), `integration` (read any order, claim capacity directly, capture payment), `validator` (scan sync). `POST /v1/orders` honours an `Idempotency-Key` header: the first 201 for a key is stored and replayed verbatim on retries.\n\nAdmin operations (`/v1/admin/*`) require an enrolled STAFF JWT (roles: admin / ops / support; admin implies all) — or, for staff management only, an operator_admin API key (bootstrap). Every admin mutation is audited with the acting human's staff id.\n\nBrowsers: the API sends no CORS headers unless the operator names allowed origins (LULAN_CORS_ALLOWED_ORIGINS). A storefront calling Lulan directly from the browser needs its origin configured; otherwise route calls through your own backend.",
+    "description": "Open-source headless reservation engine for transit: segment-aware inventory, race-free booking, itineraries (one-way, round-trip, multi-city), signed quotes, per-passenger Ed25519 QR tickets with offline validation, webhooks, and API-key auth.\n\nAuthentication: storefront endpoints (search, quotes, orders) work unauthenticated with guest checkout (`guest_contact` + retrieval token) or with a customer JWT (`Authorization: Bearer <jwt>`, operator IdP). Server-to-server endpoints take an API key via `X-Api-Key` — roles: `operator_admin` (webhooks/keys), `integration` (read any order, claim capacity directly, capture payment), `validator` (scan sync). `POST /v1/orders` honours an `Idempotency-Key` header: the first 201 for a key is stored and replayed verbatim on retries.\n\nAdmin operations (`/v1/admin/*`) require an enrolled STAFF JWT (roles: admin / ops / support; admin implies all) — or, for staff management only, an operator_admin API key (bootstrap). Every admin mutation is audited with the acting human's staff id.\n\nBrowsers: the API sends no CORS headers unless the operator names allowed origins (LULAN_CORS_ALLOWED_ORIGINS). A storefront calling Lulan directly from the browser needs its origin configured; otherwise route calls through your own backend.\n\nPayments are a port: the running provider is deployment configuration (LULAN_PAYMENT_PROVIDER), described by a JSON file or a built-in preset. Lulan never touches card data and never learns a provider's vocabulary — an adapter normalises callbacks to captured / failed. With no provider configured, the fake provider captures WITHOUT taking money: dev only.",
     "version": "0.7.5",
     "license": {
       "name": "AGPL-3.0",
@@ -370,7 +370,7 @@
     "/v1/orders/{order_id}/payment": {
       "post": {
         "summary": "Request payment (creates a provider intent)",
-        "description": "Gated like the order itself: pass the retrieval token (`?token=`), the owning customer's bearer JWT, or an API key. The intent id returned here is what captures the payment, so the order id alone does not authorise it.",
+        "description": "Gated like the order itself: pass the retrieval token (`?token=`), the owning customer's bearer JWT, or an API key. The intent id returned here is what captures the payment, so the order id alone does not authorise it. The response also carries `provider` and, when the provider uses one, a `client_secret` for the browser SDK.",
         "tags": [
           "orders"
         ],
@@ -526,10 +526,10 @@
         }
       }
     },
-    "/v1/payments/fake/webhook": {
+    "/v1/payments/webhook": {
       "post": {
-        "summary": "FakeProvider capture webhook (dev). Idempotent; auto-issues tickets on success.",
-        "description": "Requires an `integration` or `operator_admin` key. Capture turns an order into a boarding pass, so it carries the same trust as the counter-payment path it stands in for: a real provider authenticates with a signed callback, and until such an adapter exists that trust is carried by the API key.",
+        "summary": "Payment provider callback (capture / failure)",
+        "description": "The configured provider's async notification; a capture auto-issues tickets. Idempotent — duplicate and out-of-order deliveries are acknowledged with 200 and never re-applied.\n\nAuthentication depends on the provider, because it has to. A provider that signs its callbacks (any real PSP) is authenticated by that signature, verified against the raw body — it cannot be made to send an API key. A provider that does not sign (the built-in fake one) requires an `integration` or `operator_admin` key instead. This endpoint turns an order into a boarding pass; it is never open.",
         "tags": [
           "payments"
         ],
@@ -560,6 +560,7 @@
           }
         },
         "security": [
+          {},
           {
             "apiKey": []
           }

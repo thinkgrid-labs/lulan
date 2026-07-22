@@ -27,5 +27,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+# Stub PSP for the payment-adapter tests: no network, no PSP account.
+axum = { workspace = true }
+base64 = { workspace = true }
 lulan-validate = { workspace = true }
 proptest = { workspace = true }

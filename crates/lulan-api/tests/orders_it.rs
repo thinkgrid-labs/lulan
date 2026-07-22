@@ -237,7 +237,7 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     let (status, _) = request(
         &app,
         "POST",
-        "/v1/payments/fake/webhook",
+        "/v1/payments/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
     )
     .await;
@@ -251,7 +251,7 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     let (status, hook) = request_keyed(
         &app,
         "POST",
-        "/v1/payments/fake/webhook",
+        "/v1/payments/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
         Some(API_KEY),
     )
@@ -265,7 +265,7 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     let (status, dup) = request_keyed(
         &app,
         "POST",
-        "/v1/payments/fake/webhook",
+        "/v1/payments/webhook",
         Some(json!({"payment_intent_id": intent, "status": "succeeded"})),
         Some(API_KEY),
     )
@@ -278,7 +278,7 @@ async fn full_lifecycle_with_idempotent_webhooks_and_replay() {
     let (status, late_fail) = request_keyed(
         &app,
         "POST",
-        "/v1/payments/fake/webhook",
+        "/v1/payments/webhook",
         Some(json!({"payment_intent_id": intent, "status": "failed"})),
         Some(API_KEY),
     )

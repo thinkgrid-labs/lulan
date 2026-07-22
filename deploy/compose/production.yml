@@ -47,6 +47,12 @@ services:
       LULAN_IDP_HS256_SECRET: ${LULAN_IDP_HS256_SECRET:-}
       # Optional: operator pricing module (mount it below)
       LULAN_PRICING_WASM: ${LULAN_PRICING_WASM:-}
+      # Payments. A built-in preset name (`stripe`) or a path to a provider
+      # description (see deploy/payment-providers/example.json). UNSET MEANS
+      # THE FAKE PROVIDER: it captures payment without taking money.
+      LULAN_PAYMENT_PROVIDER: ${LULAN_PAYMENT_PROVIDER:-}
+      LULAN_PAYMENT_SECRET: ${LULAN_PAYMENT_SECRET:-}
+      LULAN_PAYMENT_WEBHOOK_SECRET: ${LULAN_PAYMENT_WEBHOOK_SECRET:-}
       # Optional: browser origins allowed to call the API directly.
       # Comma-separated exact origins, or `*`. Unset = server-to-server
       # only; a storefront calling from the browser needs its origin here

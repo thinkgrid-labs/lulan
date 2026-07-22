@@ -8,7 +8,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use lulan_engine::orders::{OrderStore, TransitionOutcome};
-use lulan_engine::payments::{FakeProvider, PaymentProvider};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row};
@@ -683,7 +682,7 @@ pub async fn cancel_trip(
     .map_err(|e| ApiError::Internal(e.into()))?;
 
     let store = OrderStore::new(pool.clone());
-    let provider = FakeProvider;
+    let provider = state.payments.clone();
     let (mut cancelled, mut refunded, mut failures) = (0, 0, 0);
     for row in &rows {
         let order_id: Uuid = row.get("id");
@@ -816,10 +815,13 @@ pub async fn refund_order(
     let intent: Option<String> = row.get("payment_intent_id");
     let total: i64 = row.get("total_minor");
     if let Some(intent) = &intent {
-        FakeProvider
+        // Money first, inventory second: a failed refund must not free the
+        // seat, so this propagates instead of being logged and skipped.
+        state
+            .payments
             .refund(intent, total)
             .await
-            .map_err(|e| ApiError::Internal(anyhow::anyhow!("provider refund failed: {e}")))?;
+            .map_err(crate::orders::payment_error)?;
     }
 
     let store = OrderStore::new(pool.clone());

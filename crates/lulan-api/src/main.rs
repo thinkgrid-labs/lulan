@@ -2,6 +2,7 @@ use anyhow::Context;
 use lulan_api::config::Config;
 use lulan_api::state::AppState;
 use lulan_api::{MIGRATOR, router, seed};
+use lulan_engine::payments::PaymentProvider as _;
 use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
@@ -142,6 +143,43 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Payment provider: a preset name, a path to a provider description,
+    // or nothing. "Nothing" is loud on purpose — the fake provider issues
+    // tickets without taking money, which is a demo, not a deployment.
+    let payments: std::sync::Arc<dyn lulan_engine::payments::PaymentProvider> = match &config
+        .payment_provider
+    {
+        Some(spec) => {
+            let source = match lulan_engine::payments::http::preset::by_name(spec) {
+                Some(preset) => preset.to_string(),
+                None => std::fs::read_to_string(spec).with_context(|| {
+                    format!(
+                        "LULAN_PAYMENT_PROVIDER={spec:?} is neither a built-in preset ({}) \
+                             nor a readable provider description",
+                        lulan_engine::payments::http::preset::NAMES.join(", ")
+                    )
+                })?,
+            };
+            let provider_config = lulan_engine::payments::http::ProviderConfig::from_json(&source)
+                .map_err(anyhow::Error::msg)?;
+            let provider = lulan_engine::payments::http::HttpProvider::new(provider_config)
+                .map_err(anyhow::Error::msg)?;
+            tracing::info!(
+                provider = provider.name(),
+                signed_callbacks = provider.authenticates_callbacks(),
+                "payments: provider configured"
+            );
+            std::sync::Arc::new(provider)
+        }
+        None => {
+            tracing::warn!(
+                "payments: no provider configured (LULAN_PAYMENT_PROVIDER) — using the fake \
+                     provider, which captures payment WITHOUT taking money"
+            );
+            std::sync::Arc::new(lulan_engine::payments::FakeProvider)
+        }
+    };
+
     let quote_secret = std::sync::Arc::new(match &config.quote_secret {
         Some(secret) => secret.as_bytes().to_vec(),
         None => {
@@ -174,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         redis,
         pricing,
+        payments,
         quote_secret,
         ticket_signer,
         identity,
