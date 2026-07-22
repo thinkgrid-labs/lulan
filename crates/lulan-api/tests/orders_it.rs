@@ -643,3 +643,56 @@ async fn departed_and_cancelled_trips_cannot_be_sold() {
         .await
         .unwrap();
 }
+
+/// The background sweepers run only from `main`, so nothing in the test
+/// suite ever called them — which is how a malformed `make_interval`
+/// binding shipped in one. Drive them directly.
+#[tokio::test]
+async fn background_sweepers_execute() {
+    let Some((pool, _, _)) = setup(4).await else {
+        return;
+    };
+    let store = lulan_engine::orders::OrderStore::new(pool.clone());
+
+    // Stale reservations and aged responses are reclaimed; a fresh key is
+    // left alone.
+    let fresh = format!("sweeper-fresh-{}", Uuid::new_v4());
+    let stale = format!("sweeper-stale-{}", Uuid::new_v4());
+    for (key, age) in [(&fresh, "0 minutes"), (&stale, "2 hours")] {
+        sqlx::query(&format!(
+            "INSERT INTO idempotency_keys (scope, key, request_hash, status, created_at)
+             VALUES ('test', $1, '\\x00', 'pending', now() - interval '{age}')"
+        ))
+        .bind(key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    store.sweep_idempotency_keys().await.expect("sweep runs");
+
+    let survives: i64 = sqlx::query_scalar("SELECT count(*) FROM idempotency_keys WHERE key = $1")
+        .bind(&fresh)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        survives, 1,
+        "an in-flight reservation must not be reclaimed"
+    );
+    let swept: i64 = sqlx::query_scalar("SELECT count(*) FROM idempotency_keys WHERE key = $1")
+        .bind(&stale)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        swept, 0,
+        "a reservation older than the order TTL is abandoned"
+    );
+
+    // And the cancellation drain is callable with nothing to do.
+    let stats = store
+        .settle_cancelled_trips(&lulan_engine::payments::FakeProvider, 10)
+        .await
+        .expect("cascade runs");
+    assert!(stats.failed == 0, "{stats:?}");
+}

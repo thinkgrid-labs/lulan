@@ -44,870 +44,6 @@
         }
       }
     },
-    "/v1/trips/search": {
-      "get": {
-        "summary": "Search a one-way or round-trip itinerary",
-        "tags": [
-          "trips"
-        ],
-        "parameters": [
-          {
-            "name": "origin",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "example": "BTG"
-          },
-          {
-            "name": "destination",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "example": "CEB"
-          },
-          {
-            "name": "departure_date",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "date"
-            },
-            "description": "Outbound service date"
-          },
-          {
-            "name": "trip_type",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "one_way",
-                "round_trip"
-              ],
-              "default": "one_way"
-            }
-          },
-          {
-            "name": "return_date",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "format": "date"
-            },
-            "description": "Required for round_trip, forbidden for one_way"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Legs with candidate trips",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TripSearchResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          }
-        },
-        "description": "Returns candidate trips per leg (each enriched with operator, service number, vehicle, and schedule). Pick one trip per leg to build a journeys[] quote/order. Multi-city is composed client-side from several one-way searches."
-      }
-    },
-    "/v1/trips/{trip_id}/availability": {
-      "get": {
-        "summary": "Per-seat and per-pool availability for a journey span",
-        "tags": [
-          "trips"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/TripId"
-          },
-          {
-            "name": "origin",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "destination",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Every seat's availability on the exact span, plus pool remainders",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AvailabilityResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          }
-        }
-      }
-    },
-    "/v1/holds/{hold_id}": {
-      "delete": {
-        "summary": "Release a hold",
-        "tags": [
-          "reservations"
-        ],
-        "parameters": [
-          {
-            "name": "hold_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Released (idempotent)"
-          }
-        }
-      }
-    },
-    "/v1/trips/{trip_id}/claims": {
-      "post": {
-        "summary": "Directly claim a span (low-level; prefer POST /v1/orders)",
-        "description": "Requires an `integration` or `operator_admin` key. A claim here sells capacity outside the order lifecycle — no expiry, no payment, no release endpoint — so it is never reachable anonymously. Public booking goes through POST /v1/orders, whose claims are provisional and swept on expiry.",
-        "tags": [
-          "reservations"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/TripId"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ClaimRequest"
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": "Claimed"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "409": {
-            "description": "Conflict. A departure that has left its requested origin, or that ops has cancelled, is refused here too — a trip id bypasses search, so sellability is enforced where inventory resolves."
-          }
-        }
-      }
-    },
-    "/v1/quotes": {
-      "post": {
-        "summary": "Price an itinerary and get a signed short-TTL quote token",
-        "description": "Prices reflect passenger type (regulated concession fares: child, senior, disability), occupancy tiers, peak days, advance purchase, and promos. The returned quote_token locks these prices for checkout (5 minutes). Passenger type is part of the token's match key.",
-        "tags": [
-          "quotes"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/QuoteRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Itemised quote",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/QuoteResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          },
-          "409": {
-            "description": "Conflict. A departure that has left its requested origin, or that ops has cancelled, is refused here too — a trip id bypasses search, so sellability is enforced where inventory resolves."
-          }
-        }
-      }
-    },
-    "/v1/orders": {
-      "post": {
-        "summary": "Create an order (atomic multi-passenger booking)",
-        "description": "Claims every item atomically — any conflict rolls back the whole order. Authentication: either a customer JWT bearer token, or guest checkout with `guest_contact`. Supports `Idempotency-Key` for safe retries. With `quote_token`, quoted prices are honoured; without it, items are priced live.",
-        "tags": [
-          "orders"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/IdempotencyKey"
-          }
-        ],
-        "security": [
-          {},
-          {
-            "customerJwt": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateOrderRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Order created, inventory locked (15-minute payment window)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CreateOrderResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "409": {
-            "description": "An item lost the race and nothing was booked — or the presented hold_id has expired / does not cover the itinerary (re-hold or retry without hold_id) — or the Idempotency-Key is in flight, or was already used for a different request. A departure that has left its requested origin, or that ops has cancelled, is refused here too — a trip id bypasses search, so sellability is enforced where inventory resolves."
-          },
-          "429": {
-            "$ref": "#/components/responses/RateLimited"
-          }
-        }
-      }
-    },
-    "/v1/orders/{order_id}": {
-      "get": {
-        "summary": "Fetch an order with its event trail",
-        "description": "Gated: pass the retrieval token (`?token=`), the owning customer's bearer JWT, or any API key.",
-        "tags": [
-          "orders"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/OrderId"
-          },
-          {
-            "$ref": "#/components/parameters/RetrievalToken"
-          }
-        ],
-        "security": [
-          {},
-          {
-            "customerJwt": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Order + events",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/OrderDetails"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          }
-        }
-      }
-    },
-    "/v1/orders/{order_id}/payment": {
-      "post": {
-        "summary": "Request payment (creates a provider intent)",
-        "description": "Gated like the order itself: pass the retrieval token (`?token=`), the owning customer's bearer JWT, or an API key. The intent id returned here is what captures the payment, so the order id alone does not authorise it. The response also carries `provider` and, when the provider uses one, a `client_secret` for the browser SDK.",
-        "tags": [
-          "orders"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/OrderId"
-          },
-          {
-            "$ref": "#/components/parameters/RetrievalToken"
-          }
-        ],
-        "security": [
-          {},
-          {
-            "customerJwt": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Now pending payment",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PaymentResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "409": {
-            "$ref": "#/components/responses/Conflict"
-          }
-        }
-      }
-    },
-    "/v1/orders/{order_id}/cancel": {
-      "post": {
-        "summary": "Cancel an order (releases claims atomically)",
-        "description": "Gated like the order itself: pass the retrieval token (`?token=`), the owning customer's bearer JWT, or an API key.",
-        "tags": [
-          "orders"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/OrderId"
-          },
-          {
-            "$ref": "#/components/parameters/RetrievalToken"
-          }
-        ],
-        "security": [
-          {},
-          {
-            "customerJwt": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Cancelled"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "409": {
-            "description": "Not cancellable in the current state"
-          }
-        }
-      }
-    },
-    "/v1/orders/{order_id}/claim": {
-      "post": {
-        "summary": "Attach a guest order to the authenticated customer",
-        "tags": [
-          "customers"
-        ],
-        "security": [
-          {
-            "customerJwt": []
-          }
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/OrderId"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "retrieval_token"
-                ],
-                "properties": {
-                  "retrieval_token": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Claimed"
-          },
-          "403": {
-            "description": "Invalid retrieval token"
-          },
-          "409": {
-            "description": "Already claimed"
-          }
-        }
-      }
-    },
-    "/v1/customers/me/orders": {
-      "get": {
-        "summary": "List the authenticated customer's orders",
-        "tags": [
-          "customers"
-        ],
-        "security": [
-          {
-            "customerJwt": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Orders, newest first",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/CustomerOrder"
-                  }
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          }
-        }
-      }
-    },
-    "/v1/payments/webhook": {
-      "post": {
-        "summary": "Payment provider callback (capture / failure)",
-        "description": "The configured provider's async notification; a capture auto-issues tickets. Idempotent — duplicate and out-of-order deliveries are acknowledged with 200 and never re-applied.\n\nAuthentication depends on the provider, because it has to. A provider that signs its callbacks (any real PSP) is authenticated by that signature, verified against the raw body — it cannot be made to send an API key. A provider that does not sign (the built-in fake one) requires an `integration` or `operator_admin` key instead. This endpoint turns an order into a boarding pass; it is never open.",
-        "tags": [
-          "payments"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "payment_intent_id",
-                  "status"
-                ],
-                "properties": {
-                  "payment_intent_id": {
-                    "type": "string"
-                  },
-                  "status": {
-                    "type": "string",
-                    "enum": [
-                      "succeeded",
-                      "failed"
-                    ]
-                  }
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {},
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Acknowledged (applied=false for duplicates)"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          }
-        }
-      }
-    },
-    "/v1/orders/{order_id}/tickets": {
-      "get": {
-        "summary": "Fetch issued tickets (signed QR tokens)",
-        "tags": [
-          "tickets"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/OrderId"
-          },
-          {
-            "$ref": "#/components/parameters/RetrievalToken"
-          }
-        ],
-        "security": [
-          {},
-          {
-            "customerJwt": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "One ticket per passenger",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TicketsResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          }
-        }
-      },
-      "post": {
-        "summary": "Issue tickets for a paid order (idempotent retry path)",
-        "tags": [
-          "tickets"
-        ],
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/OrderId"
-          },
-          {
-            "$ref": "#/components/parameters/RetrievalToken"
-          }
-        ],
-        "security": [
-          {},
-          {
-            "customerJwt": []
-          },
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Tickets (existing ones for already-ticketed orders)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TicketsResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Order is not paid yet"
-          }
-        }
-      }
-    },
-    "/v1/ticket-keys": {
-      "get": {
-        "summary": "Ed25519 public keys for offline ticket validation",
-        "description": "Boarding devices cache this while online; @lulan/validate then verifies tickets with no server dependency.",
-        "tags": [
-          "tickets"
-        ],
-        "responses": {
-          "200": {
-            "description": "All signing keys' public halves",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TicketKeysResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/scans": {
-      "post": {
-        "summary": "Sync a device's boarding-scan journal (batched, idempotent)",
-        "description": "Requires a validator or operator_admin API key. Replaying a journal is harmless; duplicate scans across devices are recorded as cloned-QR evidence.",
-        "tags": [
-          "tickets"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ScanSyncRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Per-scan outcomes",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ScanSyncResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "description": "Key lacks the validator role"
-          }
-        }
-      }
-    },
-    "/v1/webhooks": {
-      "post": {
-        "summary": "Register a webhook endpoint (admin)",
-        "description": "Deliveries are HMAC-signed: `X-Lulan-Signature: t=<unix>,v1=hex(hmac_sha256(secret, \"<t>.<body>\"))`. Retries with exponential backoff up to 8 attempts. Empty event_types subscribes to everything.",
-        "tags": [
-          "webhooks"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "url"
-                ],
-                "properties": {
-                  "url": {
-                    "type": "string",
-                    "format": "uri"
-                  },
-                  "event_types": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Registered; `secret` is returned exactly once",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WebhookEndpoint"
-                }
-              }
-            }
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "description": "Key lacks operator_admin"
-          }
-        }
-      },
-      "get": {
-        "summary": "List webhook endpoints (admin)",
-        "tags": [
-          "webhooks"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Endpoints (secrets never repeated)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/WebhookEndpoint"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/webhooks/{id}": {
-      "delete": {
-        "summary": "Deactivate a webhook endpoint (admin)",
-        "tags": [
-          "webhooks"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Deactivated"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          }
-        }
-      }
-    },
-    "/v1/api-keys": {
-      "post": {
-        "summary": "Mint an API key (admin; plaintext returned once)",
-        "tags": [
-          "auth"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "label",
-                  "role"
-                ],
-                "properties": {
-                  "label": {
-                    "type": "string"
-                  },
-                  "role": {
-                    "type": "string",
-                    "enum": [
-                      "operator_admin",
-                      "integration",
-                      "validator"
-                    ]
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "The new key — store it now"
-          }
-        }
-      }
-    },
-    "/v1/api-keys/{id}": {
-      "delete": {
-        "summary": "Revoke an API key (admin)",
-        "tags": [
-          "auth"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Revoked"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          }
-        }
-      }
-    },
     "/metrics": {
       "get": {
         "summary": "Prometheus metrics",
@@ -935,293 +71,6 @@
             "description": "OpenAPI 3.0 spec"
           }
         }
-      }
-    },
-    "/v1/holds": {
-      "post": {
-        "summary": "Hold a one-way or round-trip seat selection (one itinerary hold)",
-        "description": "Soft-holds a one-way or round-trip selection as one itinerary hold. All-or-nothing. Holds are advisory: they protect a selection from other holds while the customer fills in details, and never gate the sale.\n\nBecause this endpoint needs no credential, two limits bound how much inventory one session can take off sale: at most 20 seats per request, and a ceiling on how much of a single trip may be held at once (LULAN_HOLD_MAX_TRIP_FRACTION, default 0.75). Hitting the ceiling is a 409 — the booking still completes without a hold.",
-        "tags": [
-          "reservations"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/HoldRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Itinerary hold created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HoldResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "$ref": "#/components/responses/BadRequest"
-          },
-          "409": {
-            "description": "A seat is already held or sold; nothing was held. A departure that has left its requested origin, or that ops has cancelled, is refused here too — a trip id bypasses search, so sellability is enforced where inventory resolves, or the trip is at its hold ceiling (book without a hold, or retry shortly)."
-          },
-          "503": {
-            "description": "Holds unavailable (Redis down); claims still work"
-          }
-        }
-      }
-    },
-    "/v1/ancillaries": {
-      "get": {
-        "summary": "Add-on catalog (public)",
-        "description": "Everything the operator sells alongside the fare — baggage, meals, insurance, priority boarding. Add lines to quotes/orders via their codes. No hold required: nothing here is scarce (scarce add-ons are capacity units — extra legroom is a seat, baggage kilos are the cargo pool).",
-        "tags": [
-          "ancillaries"
-        ],
-        "responses": {
-          "200": {
-            "description": "Active catalog",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/Ancillary"
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "summary": "Add a catalog entry (admin)",
-        "tags": [
-          "ancillaries"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "code",
-                  "name",
-                  "kind",
-                  "price_minor"
-                ],
-                "properties": {
-                  "code": {
-                    "type": "string"
-                  },
-                  "name": {
-                    "type": "string"
-                  },
-                  "description": {
-                    "type": "string"
-                  },
-                  "kind": {
-                    "type": "string"
-                  },
-                  "price_minor": {
-                    "type": "integer",
-                    "format": "int64"
-                  },
-                  "per": {
-                    "type": "string",
-                    "enum": [
-                      "passenger",
-                      "order"
-                    ],
-                    "default": "passenger"
-                  },
-                  "scope": {
-                    "type": "string",
-                    "enum": [
-                      "journey",
-                      "itinerary"
-                    ],
-                    "default": "itinerary"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Created",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Ancillary"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Code already exists"
-          }
-        }
-      }
-    },
-    "/v1/ancillaries/{id}": {
-      "delete": {
-        "summary": "Deactivate a catalog entry (admin; sold orders keep their snapshots)",
-        "tags": [
-          "ancillaries"
-        ],
-        "security": [
-          {
-            "apiKey": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Deactivated"
-          },
-          "404": {
-            "$ref": "#/components/responses/NotFound"
-          }
-        }
-      }
-    },
-    "/v1/admin/staff": {
-      "post": {
-        "summary": "Enrol an IdP identity as staff (admin)",
-        "tags": [
-          "admin"
-        ],
-        "security": [
-          {
-            "staffJwt": []
-          }
-        ],
-        "responses": {
-          "201": {
-            "description": "Enrolled"
-          },
-          "403": {
-            "description": "Admin only"
-          }
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "subject",
-                  "display_name",
-                  "role"
-                ],
-                "properties": {
-                  "issuer": {
-                    "type": "string"
-                  },
-                  "subject": {
-                    "type": "string"
-                  },
-                  "display_name": {
-                    "type": "string"
-                  },
-                  "email": {
-                    "type": "string"
-                  },
-                  "role": {
-                    "type": "string",
-                    "enum": [
-                      "admin",
-                      "ops",
-                      "support"
-                    ]
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
-      "get": {
-        "summary": "List staff (admin)",
-        "tags": [
-          "admin"
-        ],
-        "security": [
-          {
-            "staffJwt": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "description": "Not enrolled / role missing"
-          }
-        }
-      }
-    },
-    "/v1/admin/staff/{id}": {
-      "delete": {
-        "summary": "Revoke staff access (admin)",
-        "tags": [
-          "admin"
-        ],
-        "security": [
-          {
-            "staffJwt": []
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "description": "Not enrolled / role missing"
-          }
-        },
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          }
-        ]
       }
     },
     "/v1/admin/fare-rules": {
@@ -1359,6 +208,86 @@
         }
       }
     },
+    "/v1/admin/orders": {
+      "get": {
+        "summary": "Search orders by contact, passenger name, or trip (support)",
+        "tags": [
+          "admin"
+        ],
+        "security": [
+          {
+            "staffJwt": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Not enrolled / role missing"
+          }
+        },
+        "parameters": [
+          {
+            "name": "contact",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trip_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/admin/orders/{id}/refund": {
+      "post": {
+        "summary": "Full refund via the payment port; frees seats, voids tickets (support)",
+        "tags": [
+          "admin"
+        ],
+        "security": [
+          {
+            "staffJwt": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Refunded"
+          },
+          "409": {
+            "description": "Not refundable in current state"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
     "/v1/admin/routes": {
       "post": {
         "summary": "Create a route with per-stop schedule offsets (ops)",
@@ -1421,9 +350,9 @@
         }
       }
     },
-    "/v1/admin/vessels": {
+    "/v1/admin/staff": {
       "post": {
-        "summary": "Create a vehicle/capacity template (ops)",
+        "summary": "Enrol an IdP identity as staff (admin)",
         "tags": [
           "admin"
         ],
@@ -1434,7 +363,10 @@
         ],
         "responses": {
           "201": {
-            "description": "Created"
+            "description": "Enrolled"
+          },
+          "403": {
+            "description": "Admin only"
           }
         },
         "requestBody": {
@@ -1444,57 +376,116 @@
               "schema": {
                 "type": "object",
                 "required": [
-                  "code",
-                  "name",
-                  "kind"
+                  "subject",
+                  "display_name",
+                  "role"
                 ],
                 "properties": {
-                  "code": {
+                  "issuer": {
                     "type": "string"
                   },
-                  "name": {
+                  "subject": {
                     "type": "string"
                   },
-                  "kind": {
+                  "display_name": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  },
+                  "role": {
                     "type": "string",
                     "enum": [
-                      "bus",
-                      "ferry",
-                      "aircraft",
-                      "other"
+                      "admin",
+                      "ops",
+                      "support"
                     ]
-                  },
-                  "seats": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": {
-                        "code": {
-                          "type": "string"
-                        },
-                        "fare_class": {
-                          "type": "string"
-                        }
-                      }
-                    }
-                  },
-                  "pools": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": {
-                        "code": {
-                          "type": "string"
-                        },
-                        "capacity": {
-                          "type": "integer"
-                        }
-                      }
-                    }
                   }
                 }
               }
             }
+          }
+        }
+      },
+      "get": {
+        "summary": "List staff (admin)",
+        "tags": [
+          "admin"
+        ],
+        "security": [
+          {
+            "staffJwt": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Not enrolled / role missing"
+          }
+        }
+      }
+    },
+    "/v1/admin/staff/{id}": {
+      "delete": {
+        "summary": "Revoke staff access (admin)",
+        "tags": [
+          "admin"
+        ],
+        "security": [
+          {
+            "staffJwt": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Not enrolled / role missing"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/admin/ticket-keys/rotate": {
+      "post": {
+        "summary": "Rotate the ticket signing key",
+        "description": "Mints a new Ed25519 key and makes it active. Takes effect immediately on every replica: issuance reads the active key per ticket rather than caching one at boot.\n\nPrevious keys stay published by GET /v1/ticket-keys, because tickets already in passengers' wallets were signed with them and must keep verifying until they expire. Rotation changes what gets signed next; it does not invalidate what was signed before. Responding to a leaked key means rotating AND revoking the tickets it signed.",
+        "tags": [
+          "admin"
+        ],
+        "security": [
+          {
+            "staffJwt": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "New active key: kid + public_key"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           }
         }
       }
@@ -1624,9 +615,9 @@
         ]
       }
     },
-    "/v1/admin/orders": {
-      "get": {
-        "summary": "Search orders by contact, passenger name, or trip (support)",
+    "/v1/admin/vessels": {
+      "post": {
+        "summary": "Create a vehicle/capacity template (ops)",
         "tags": [
           "admin"
         ],
@@ -1636,61 +627,183 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "OK"
-          },
-          "401": {
-            "$ref": "#/components/responses/Unauthorized"
-          },
-          "403": {
-            "description": "Not enrolled / role missing"
+          "201": {
+            "description": "Created"
           }
         },
-        "parameters": [
-          {
-            "name": "contact",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "name",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "trip_id",
-            "in": "query",
-            "schema": {
-              "type": "string",
-              "format": "uuid"
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "name",
+                  "kind"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "bus",
+                      "ferry",
+                      "aircraft",
+                      "other"
+                    ]
+                  },
+                  "seats": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "fare_class": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  },
+                  "pools": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "code": {
+                          "type": "string"
+                        },
+                        "capacity": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
-        ]
+        }
       }
     },
-    "/v1/admin/orders/{id}/refund": {
-      "post": {
-        "summary": "Full refund via the payment port; frees seats, voids tickets (support)",
+    "/v1/ancillaries": {
+      "get": {
+        "summary": "Add-on catalog (public)",
+        "description": "Everything the operator sells alongside the fare — baggage, meals, insurance, priority boarding. Add lines to quotes/orders via their codes. No hold required: nothing here is scarce (scarce add-ons are capacity units — extra legroom is a seat, baggage kilos are the cargo pool).",
         "tags": [
-          "admin"
-        ],
-        "security": [
-          {
-            "staffJwt": []
-          }
+          "ancillaries"
         ],
         "responses": {
           "200": {
-            "description": "Refunded"
-          },
-          "409": {
-            "description": "Not refundable in current state"
+            "description": "Active catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Ancillary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Add a catalog entry (admin)",
+        "tags": [
+          "ancillaries"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "code",
+                  "name",
+                  "kind",
+                  "price_minor"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  },
+                  "price_minor": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "per": {
+                    "type": "string",
+                    "enum": [
+                      "passenger",
+                      "order"
+                    ],
+                    "default": "passenger"
+                  },
+                  "scope": {
+                    "type": "string",
+                    "enum": [
+                      "journey",
+                      "itinerary"
+                    ],
+                    "default": "itinerary"
+                  }
+                }
+              }
+            }
           }
         },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ancillary"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Code already exists"
+          }
+        }
+      }
+    },
+    "/v1/ancillaries/{id}": {
+      "delete": {
+        "summary": "Deactivate a catalog entry (admin; sold orders keep their snapshots)",
+        "tags": [
+          "ancillaries"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
         "parameters": [
           {
             "name": "id",
@@ -1701,7 +814,953 @@
               "format": "uuid"
             }
           }
-        ]
+        ],
+        "responses": {
+          "200": {
+            "description": "Deactivated"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/api-keys": {
+      "post": {
+        "summary": "Mint an API key (admin; plaintext returned once)",
+        "tags": [
+          "auth"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "label",
+                  "role"
+                ],
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "operator_admin",
+                      "integration",
+                      "validator"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The new key — store it now"
+          }
+        }
+      }
+    },
+    "/v1/api-keys/{id}": {
+      "delete": {
+        "summary": "Revoke an API key (admin)",
+        "tags": [
+          "auth"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/customers/me/orders": {
+      "get": {
+        "summary": "List the authenticated customer's orders",
+        "tags": [
+          "customers"
+        ],
+        "security": [
+          {
+            "customerJwt": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Orders, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CustomerOrder"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/holds": {
+      "post": {
+        "summary": "Hold a one-way or round-trip seat selection (one itinerary hold)",
+        "description": "Soft-holds a one-way or round-trip selection as one itinerary hold. All-or-nothing. Holds are advisory: they protect a selection from other holds while the customer fills in details, and never gate the sale.\n\nBecause this endpoint needs no credential, two limits bound how much inventory one session can take off sale: at most 20 seats per request, and a ceiling on how much of a single trip may be held at once (LULAN_HOLD_MAX_TRIP_FRACTION, default 0.75). Hitting the ceiling is a 409 — the booking still completes without a hold.",
+        "tags": [
+          "reservations"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HoldRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Itinerary hold created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HoldResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "description": "A seat is already held or sold; nothing was held. A departure that has left its requested origin, or that ops has cancelled, is refused here too — a trip id bypasses search, so sellability is enforced where inventory resolves, or the trip is at its hold ceiling (book without a hold, or retry shortly)."
+          },
+          "503": {
+            "description": "Holds unavailable (Redis down); claims still work"
+          }
+        }
+      }
+    },
+    "/v1/holds/{hold_id}": {
+      "delete": {
+        "summary": "Release a hold",
+        "tags": [
+          "reservations"
+        ],
+        "parameters": [
+          {
+            "name": "hold_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Released (idempotent)"
+          }
+        }
+      }
+    },
+    "/v1/orders": {
+      "post": {
+        "summary": "Create an order (atomic multi-passenger booking)",
+        "description": "Claims every item atomically — any conflict rolls back the whole order. Authentication: either a customer JWT bearer token, or guest checkout with `guest_contact`. Supports `Idempotency-Key` for safe retries. With `quote_token`, quoted prices are honoured; without it, items are priced live.",
+        "tags": [
+          "orders"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "security": [
+          {},
+          {
+            "customerJwt": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Order created, inventory locked (15-minute payment window)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateOrderResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "description": "An item lost the race and nothing was booked — or the presented hold_id has expired / does not cover the itinerary (re-hold or retry without hold_id) — or the Idempotency-Key is in flight, or was already used for a different request. A departure that has left its requested origin, or that ops has cancelled, is refused here too — a trip id bypasses search, so sellability is enforced where inventory resolves."
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/v1/orders/{order_id}": {
+      "get": {
+        "summary": "Fetch an order with its event trail",
+        "description": "Gated: pass the retrieval token (`?token=`), the owning customer's bearer JWT, or any API key.",
+        "tags": [
+          "orders"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/RetrievalToken"
+          }
+        ],
+        "security": [
+          {},
+          {
+            "customerJwt": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order + events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderDetails"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/orders/{order_id}/cancel": {
+      "post": {
+        "summary": "Cancel an order (releases claims atomically)",
+        "description": "Gated like the order itself: pass the retrieval token (`?token=`), the owning customer's bearer JWT, or an API key.",
+        "tags": [
+          "orders"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/RetrievalToken"
+          }
+        ],
+        "security": [
+          {},
+          {
+            "customerJwt": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancelled"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "description": "Not cancellable in the current state"
+          }
+        }
+      }
+    },
+    "/v1/orders/{order_id}/claim": {
+      "post": {
+        "summary": "Attach a guest order to the authenticated customer",
+        "tags": [
+          "customers"
+        ],
+        "security": [
+          {
+            "customerJwt": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "retrieval_token"
+                ],
+                "properties": {
+                  "retrieval_token": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Claimed"
+          },
+          "403": {
+            "description": "Invalid retrieval token"
+          },
+          "409": {
+            "description": "Already claimed"
+          }
+        }
+      }
+    },
+    "/v1/orders/{order_id}/payment": {
+      "post": {
+        "summary": "Request payment (creates a provider intent)",
+        "description": "Gated like the order itself: pass the retrieval token (`?token=`), the owning customer's bearer JWT, or an API key. The intent id returned here is what captures the payment, so the order id alone does not authorise it. The response also carries `provider` and, when the provider uses one, a `client_secret` for the browser SDK.",
+        "tags": [
+          "orders"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/RetrievalToken"
+          }
+        ],
+        "security": [
+          {},
+          {
+            "customerJwt": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Now pending payment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/orders/{order_id}/tickets": {
+      "get": {
+        "summary": "Fetch issued tickets (signed QR tokens)",
+        "tags": [
+          "tickets"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/RetrievalToken"
+          }
+        ],
+        "security": [
+          {},
+          {
+            "customerJwt": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One ticket per passenger",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TicketsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      },
+      "post": {
+        "summary": "Issue tickets for a paid order (idempotent retry path)",
+        "tags": [
+          "tickets"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/RetrievalToken"
+          }
+        ],
+        "security": [
+          {},
+          {
+            "customerJwt": []
+          },
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tickets (existing ones for already-ticketed orders)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TicketsResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Order is not paid yet"
+          }
+        }
+      }
+    },
+    "/v1/payments/webhook": {
+      "post": {
+        "summary": "Payment provider callback (capture / failure)",
+        "description": "The configured provider's async notification; a capture auto-issues tickets. Idempotent — duplicate and out-of-order deliveries are acknowledged with 200 and never re-applied.\n\nAuthentication depends on the provider, because it has to. A provider that signs its callbacks (any real PSP) is authenticated by that signature, verified against the raw body — it cannot be made to send an API key. A provider that does not sign (the built-in fake one) requires an `integration` or `operator_admin` key instead. This endpoint turns an order into a boarding pass; it is never open.",
+        "tags": [
+          "payments"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "payment_intent_id",
+                  "status"
+                ],
+                "properties": {
+                  "payment_intent_id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "succeeded",
+                      "failed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {},
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Acknowledged (applied=false for duplicates)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/quotes": {
+      "post": {
+        "summary": "Price an itinerary and get a signed short-TTL quote token",
+        "description": "Prices reflect passenger type (regulated concession fares: child, senior, disability), occupancy tiers, peak days, advance purchase, and promos. The returned quote_token locks these prices for checkout (5 minutes). Passenger type is part of the token's match key.",
+        "tags": [
+          "quotes"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuoteRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Itemised quote",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuoteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Conflict. A departure that has left its requested origin, or that ops has cancelled, is refused here too — a trip id bypasses search, so sellability is enforced where inventory resolves."
+          }
+        }
+      }
+    },
+    "/v1/revocations": {
+      "get": {
+        "summary": "Tickets to refuse despite a valid signature",
+        "description": "A signature proves a ticket was issued; it cannot prove the ticket is still good, because refunds and trip cancellations happen after signing. Gate devices cache this list next to GET /v1/ticket-keys and pass it to `lulan_validate::verify_ticket_with_revocations`.\n\nWith `trip_id` the answer is complete for that departure however far off it is — a gate must never receive a truncated list for the trip it is boarding. Without it, the list covers trips departing in the next 72 hours so it cannot grow without bound.\n\nCoverage is bounded by how recently a device synced. That is the same honest limit clone detection lives with: an offline device cannot know what it has not been told.",
+        "tags": [
+          "tickets"
+        ],
+        "parameters": [
+          {
+            "name": "trip_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Scope to one departure; the answer is then complete."
+          }
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked ticket ids, with as_of and horizon_hours"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/v1/scans": {
+      "post": {
+        "summary": "Sync a device's boarding-scan journal (batched, idempotent)",
+        "description": "Requires a validator or operator_admin API key. Replaying a journal is harmless; duplicate scans across devices are recorded as cloned-QR evidence.",
+        "tags": [
+          "tickets"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanSyncRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per-scan outcomes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanSyncResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Key lacks the validator role"
+          }
+        }
+      }
+    },
+    "/v1/ticket-keys": {
+      "get": {
+        "summary": "Ed25519 public keys for offline ticket validation",
+        "description": "Boarding devices cache this while online; @lulan/validate then verifies tickets with no server dependency.",
+        "tags": [
+          "tickets"
+        ],
+        "responses": {
+          "200": {
+            "description": "All signing keys' public halves",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TicketKeysResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/trips/search": {
+      "get": {
+        "summary": "Search a one-way or round-trip itinerary",
+        "tags": [
+          "trips"
+        ],
+        "parameters": [
+          {
+            "name": "origin",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "BTG"
+          },
+          {
+            "name": "destination",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "example": "CEB"
+          },
+          {
+            "name": "departure_date",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Outbound service date"
+          },
+          {
+            "name": "trip_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "one_way",
+                "round_trip"
+              ],
+              "default": "one_way"
+            }
+          },
+          {
+            "name": "return_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Required for round_trip, forbidden for one_way"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Legs with candidate trips",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TripSearchResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        },
+        "description": "Returns candidate trips per leg (each enriched with operator, service number, vehicle, and schedule). Pick one trip per leg to build a journeys[] quote/order. Multi-city is composed client-side from several one-way searches."
+      }
+    },
+    "/v1/trips/{trip_id}/availability": {
+      "get": {
+        "summary": "Per-seat and per-pool availability for a journey span",
+        "tags": [
+          "trips"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TripId"
+          },
+          {
+            "name": "origin",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "destination",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every seat's availability on the exact span, plus pool remainders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AvailabilityResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/trips/{trip_id}/claims": {
+      "post": {
+        "summary": "Directly claim a span (low-level; prefer POST /v1/orders)",
+        "description": "Requires an `integration` or `operator_admin` key. A claim here sells capacity outside the order lifecycle — no expiry, no payment, no release endpoint — so it is never reachable anonymously. Public booking goes through POST /v1/orders, whose claims are provisional and swept on expiry.",
+        "tags": [
+          "reservations"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TripId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaimRequest"
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Claimed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "409": {
+            "description": "Conflict. A departure that has left its requested origin, or that ops has cancelled, is refused here too — a trip id bypasses search, so sellability is enforced where inventory resolves."
+          }
+        }
+      }
+    },
+    "/v1/webhooks": {
+      "post": {
+        "summary": "Register a webhook endpoint (admin)",
+        "description": "Deliveries are HMAC-signed: `X-Lulan-Signature: t=<unix>,v1=hex(hmac_sha256(secret, \"<t>.<body>\"))`. Retries with exponential backoff up to 8 attempts. Empty event_types subscribes to everything.",
+        "tags": [
+          "webhooks"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "event_types": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Registered; `secret` is returned exactly once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookEndpoint"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "description": "Key lacks operator_admin"
+          }
+        }
+      },
+      "get": {
+        "summary": "List webhook endpoints (admin)",
+        "tags": [
+          "webhooks"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Endpoints (secrets never repeated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WebhookEndpoint"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/webhooks/{id}": {
+      "delete": {
+        "summary": "Deactivate a webhook endpoint (admin)",
+        "tags": [
+          "webhooks"
+        ],
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deactivated"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
       }
     }
   },

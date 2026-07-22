@@ -32,6 +32,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+base64 = { workspace = true }
 lulan-validate = { workspace = true }
 reqwest = { workspace = true }
 tower = { workspace = true, features = ["util"] }

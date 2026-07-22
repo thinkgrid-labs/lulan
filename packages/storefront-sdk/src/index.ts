@@ -525,6 +525,16 @@ export class LulanClient {
   }
 
   /** Public keys for offline validation — cache these on crew devices. */
+  /**
+   * Tickets to refuse even though they verify — refunds, cancellations.
+   * Cache alongside ticketKeys and pass to the validator. Scope to a trip
+   * for a complete answer; unscoped covers the next few days.
+   */
+  revocations(tripId?: string, options?: RequestOptions): Promise<{ revoked: string[]; as_of: string; horizon_hours: number }> {
+    const query = tripId ? `?trip_id=${encodeURIComponent(tripId)}` : "";
+    return this.request("GET", `/v1/revocations${query}`, undefined, options);
+  }
+
   ticketKeys(options?: RequestOptions): Promise<{ keys: TicketKey[] }> {
     return this.request("GET", "/v1/ticket-keys", undefined, options);
   }

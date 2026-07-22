@@ -52,7 +52,7 @@ Selling a seat means atomically claiming a **span of segments** on a **specific 
 | **Multi-passenger itineraries** | One order, N passengers; per-passenger seats and fares, including regulated concession fares (child, senior, disability) that many markets mandate by law. |
 | **Pluggable pricing (WASM)** | Deterministic integer-only fare rules, plus operator-supplied pricing modules run in a fuel-metered, memory-capped WebAssembly sandbox with **no host imports** — measured at p95 ≈ 443 µs per quote. Native and WASM engines are property-tested to be bit-identical. |
 | **Signed quotes** | Short-TTL HMAC quote tokens: the price shown is the price charged, tamper-proof. |
-| **Offline ticket validation** | Ed25519-signed CBOR QR tickets (~245 bytes). The `lulan-validate` crate verifies them with no server, no clock assumptions, and compiles to WebAssembly for browser and mobile boarding apps. |
+| **Offline ticket validation** | Ed25519-signed CBOR QR tickets (~245 bytes). The `lulan-validate` crate verifies them with no server, no clock assumptions, and compiles to WebAssembly for browser and mobile boarding apps. Signing keys rotate live; gates carry a revocation list so refunded tickets are refused offline too. |
 | **Offline boarding sync** | Gate and crew devices journal scans locally and sync idempotent batches when connectivity returns; duplicate and cloned-QR scans are detected and flagged. |
 | **Payments without lock-in** | The provider is a port described by configuration, not code: a JSON file names a PSP's create/refund/callback endpoints, auth style, field mappings and signature scheme. Stripe ships as a preset; anything else is a file. |
 | **Headless & self-hostable** | JSON REST APIs only — bring your own storefront, kiosk, or POS. One Docker image, PostgreSQL + Redis, no per-booking fees. |
@@ -133,7 +133,8 @@ just loadgen-paced 200 30  # open-loop 200 req/s — honest seat-lock latencies
 | `POST /v1/orders/{id}/cancel` | Cancel and release claims — order credential required |
 | `POST /v1/payments/webhook` | Provider capture callback → auto-issues tickets (signature-authenticated, or integration key for unsigned providers) |
 | `GET /v1/orders/{id}/tickets` | Ed25519-signed QR ticket tokens |
-| `GET /v1/ticket-keys` | Public keys for offline validators |
+| `GET /v1/ticket-keys` | Public keys for offline validators (every key, live and retired) |
+| `GET /v1/revocations` | Tickets to refuse despite a valid signature — refunds, cancellations (validator key) |
 | `POST /v1/scans` | Batched, idempotent boarding-scan sync (validator key) |
 | `GET /v1/customers/me/orders` | Authenticated customer's bookings (IdP JWT) |
 | `POST /v1/webhooks` | Register HMAC-signed webhook endpoints (admin key) |
@@ -153,6 +154,41 @@ listed: quotes, holds, claims and orders all 409 once the trip has left
 the requested origin (judged per leg — a service mid-journey can still
 sell its later legs) or once ops has cancelled it. Availability stays
 readable either way; crew and support still need to see past departures.
+
+### What offline validation does and doesn't prove
+
+A valid signature proves a ticket was **issued by the operator and not
+altered**. It proves nothing about what happened afterwards, and two
+things do:
+
+- **Cloning.** A copied QR is still a genuine QR. Same-device re-scans are
+  rejected from the device's local seen-set; cross-device duplicates are
+  detected server-side once scan journals sync.
+- **Revocation.** A refund happens *after* signing, so no offline check
+  can derive it from the ticket. Devices cache `GET /v1/revocations`
+  alongside the key set and pass it to `verify_ticket_with_revocations`.
+
+Both are **detection**, bounded by how recently a device synced — a gate
+that has never synced cannot know. We would rather say that than imply
+cryptography solves it.
+
+Signing keys rotate through `POST /v1/admin/ticket-keys/rotate` and take
+effect immediately on every replica. Retired keys stay published, because
+tickets already in wallets were signed with them; rotation changes what is
+signed next, so responding to a leaked key means rotating **and** revoking
+what it signed.
+
+The private half is **encrypted at rest** (XChaCha20-Poly1305, keyed by
+`LULAN_TICKET_KEY_ENCRYPTION_KEY`), so a database dump — a backup, a
+stolen replica, an over-broad read grant — no longer contains anything
+that can forge a boarding pass. Set the variable and restart: existing
+keys are sealed in place. It buys separation of the database from the
+signing key, which is the realistic breach; it is not an HSM and does not
+defend a compromised host, which reads the environment either way.
+
+Losing that key is recoverable, deliberately: public halves stay
+unencrypted, so issued tickets keep verifying and you only lose the
+ability to sign new ones — which a rotation fixes.
 
 ## Bring your own providers
 
@@ -289,6 +325,7 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] Multi-passenger orders with passenger-type fares
 - [x] Ed25519 QR ticketing + offline validation (`lulan-validate`)
 - [x] Offline boarding-scan sync with replay/clone detection
+- [x] Ticket key rotation (live, no restart), signing keys encrypted at rest, and a revocation list gates carry offline
 - [x] Webhooks: HMAC-signed deliveries with durable retries
 - [x] Authentication: API keys + roles, identity-provider port, guest checkout with retrieval tokens
 - [x] Order-scoped authorization — paying, cancelling, reading an order or its tickets each require that order's credential; the id alone is not one

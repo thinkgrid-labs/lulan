@@ -181,6 +181,14 @@ export class LulanAdmin {
   }
 
   /** Cancel a departure; cascades (unpaid cancelled, paid refunded). */
+  /**
+   * Mint a new ticket signing key. Live on every replica immediately;
+   * retired keys stay published so issued tickets keep verifying.
+   */
+  rotateTicketKey(): Promise<{ kid: string; public_key: string }> {
+    return this.request("POST", "/v1/admin/ticket-keys/rotate", {});
+  }
+
   cancelTrip(tripId: string): Promise<{
     trip_id: string;
     orders_cancelled: number;

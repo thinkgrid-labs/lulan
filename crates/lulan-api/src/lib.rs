@@ -67,6 +67,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/ticket-keys", get(tickets::keys))
         .route("/v1/scans", post(tickets::sync))
+        .route("/v1/revocations", get(tickets::revocations))
         .route("/v1/orders/{order_id}/claim", post(identity::claim_order))
         .route("/v1/customers/me/orders", get(identity::my_orders))
         .route(
@@ -102,6 +103,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/admin/fare-rules/{id}/activate",
             post(admin::activate_fare_rules),
+        )
+        .route(
+            "/v1/admin/ticket-keys/rotate",
+            post(admin::rotate_ticket_key),
         )
         .route("/v1/admin/locations", post(admin::create_location))
         .route("/v1/admin/routes", post(admin::create_route))

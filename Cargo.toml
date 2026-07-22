@@ -25,6 +25,7 @@ lulan-validate = { path = "crates/lulan-validate" }
 anyhow = "1"
 axum = { version = "0.8", features = ["http2"] }
 base64 = "0.22"
+chacha20poly1305 = "0.10"
 ciborium = "0.2"
 csv = "1"
 ed25519-dalek = "2"

@@ -16,10 +16,13 @@
 //! duplicates across devices surface post-hoc — the honest threat model
 //! (a signature cannot stop a cloned QR on two offline devices).
 
+pub mod sealing;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Duration, Utc};
 use ed25519_dalek::{Signer, SigningKey};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row};
@@ -85,6 +88,8 @@ pub enum TicketError {
     #[error("no active signing key")]
     NoSigningKey,
     #[error(transparent)]
+    Sealing(#[from] sealing::SealError),
+    #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
@@ -111,38 +116,166 @@ impl TicketSigner {
         URL_SAFE_NO_PAD.encode(self.key.verifying_key().as_bytes())
     }
 
-    /// Load the active key, generating and persisting one on first boot.
-    pub async fn load_or_create(pool: &PgPool) -> Result<Self, sqlx::Error> {
-        if let Some(row) = sqlx::query(
-            "SELECT kid, secret FROM ticket_keys WHERE active ORDER BY created_at DESC LIMIT 1",
+    /// The key tickets are currently signed with, or `None` before one
+    /// exists.
+    ///
+    /// Read at issue time rather than cached at boot, so a rotation takes
+    /// effect immediately and on every replica. One indexed row read on a
+    /// path that already opens a transaction is not worth the staleness a
+    /// process-lifetime cache would introduce — a replica still signing
+    /// with a retired key is precisely what rotation exists to stop.
+    pub async fn active(pool: &PgPool) -> Result<Option<Self>, TicketError> {
+        let Some(row) = sqlx::query(
+            "SELECT kid, secret, encryption, nonce FROM ticket_keys
+             WHERE active ORDER BY created_at DESC LIMIT 1",
         )
         .fetch_optional(pool)
         .await?
-        {
-            let secret: Vec<u8> = row.try_get("secret")?;
-            let bytes: [u8; 32] = secret.try_into().expect("ticket_keys.secret is 32 bytes");
-            return Ok(Self {
-                kid: row.try_get("kid")?,
-                key: SigningKey::from_bytes(&bytes),
-            });
-        }
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Self::from_row(&row)?))
+    }
 
-        // 256 bits from two v4 UUIDs (~244 bits entropy) — fine for a
-        // dev-generated key; production operators should rotate in a key
-        // from their KMS.
+    /// Decode one `ticket_keys` row, sealed or not.
+    pub(crate) fn from_row(row: &sqlx::postgres::PgRow) -> Result<Self, TicketError> {
+        let kid: String = row.try_get("kid")?;
+        let secret: Vec<u8> = row.try_get("secret")?;
+        let encryption: Option<String> = row.try_get("encryption")?;
+        let nonce: Option<Vec<u8>> = row.try_get("nonce")?;
+        let seed = sealing::unseal_row(&kid, encryption.as_deref(), nonce.as_deref(), &secret)?;
+        Ok(Self {
+            kid,
+            key: SigningKey::from_bytes(&seed),
+        })
+    }
+
+    /// Load one key by id — for inspecting a specific key, live or
+    /// retired, without disturbing which one is active.
+    pub async fn load(pool: &PgPool, kid: &str) -> Result<Option<Self>, TicketError> {
+        let Some(row) =
+            sqlx::query("SELECT kid, secret, encryption, nonce FROM ticket_keys WHERE kid = $1")
+                .bind(kid)
+                .fetch_optional(pool)
+                .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Self::from_row(&row)?))
+    }
+
+    /// Load the active key, generating and persisting one on first boot.
+    pub async fn load_or_create(pool: &PgPool) -> Result<Self, TicketError> {
+        if let Some(signer) = Self::active(pool).await? {
+            return Ok(signer);
+        }
+        Self::rotate(pool).await
+    }
+
+    /// Mint a new signing key and make it the active one.
+    ///
+    /// Previous keys are deactivated but NOT deleted: tickets already in
+    /// passengers' wallets were signed with them and must keep verifying
+    /// until they expire, so `GET /v1/ticket-keys` goes on publishing
+    /// every public half. Rotation changes what gets signed next; it does
+    /// not invalidate what was signed before. Retiring a key for real
+    /// means rotating AND revoking the tickets it signed.
+    pub async fn rotate(pool: &PgPool) -> Result<Self, TicketError> {
+        // 32 bytes from the OS CSPRNG. The old construction stitched two
+        // v4 UUIDs together, which is ~244 bits with six of them fixed by
+        // the UUID version and variant fields — no way to derive a
+        // signing key.
         let mut seed = [0u8; 32];
-        seed[..16].copy_from_slice(Uuid::new_v4().as_bytes());
-        seed[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        rand::rng().fill_bytes(&mut seed);
         let key = SigningKey::from_bytes(&seed);
         let kid = format!("lulan-{}", &Uuid::new_v4().simple().to_string()[..8]);
-        sqlx::query("INSERT INTO ticket_keys (kid, secret, public) VALUES ($1, $2, $3)")
-            .bind(&kid)
-            .bind(seed.as_slice())
-            .bind(key.verifying_key().as_bytes().as_slice())
-            .execute(pool)
+
+        // Sealed when the operator has configured a wrapping key; stored
+        // as-is otherwise, which is the pre-existing behaviour.
+        let sealed = sealing::KeyWrapper::from_env()?
+            .map(|wrapper| wrapper.seal(&kid, &seed))
+            .transpose()?;
+        let (stored, scheme, nonce) = match &sealed {
+            Some(s) => (
+                s.ciphertext.as_slice(),
+                Some(s.scheme),
+                Some(s.nonce.as_slice()),
+            ),
+            None => (seed.as_slice(), None, None),
+        };
+
+        let mut tx = pool.begin().await?;
+        sqlx::query("UPDATE ticket_keys SET active = false WHERE active")
+            .execute(&mut *tx)
             .await?;
-        tracing::info!(%kid, "generated ticket signing key");
+        sqlx::query(
+            "INSERT INTO ticket_keys (kid, secret, public, active, encryption, nonce)
+             VALUES ($1, $2, $3, true, $4, $5)",
+        )
+        .bind(&kid)
+        .bind(stored)
+        .bind(key.verifying_key().as_bytes().as_slice())
+        .bind(scheme)
+        .bind(nonce)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        tracing::info!(%kid, sealed = sealed.is_some(), "ticket signing key rotated");
         Ok(Self { kid, key })
+    }
+
+    /// Seal any signing keys still stored in the clear.
+    ///
+    /// Run at boot so adopting encryption is "set the env var and
+    /// restart" rather than a migration the operator has to script. A
+    /// no-op when no wrapping key is configured, and idempotent: rows
+    /// already sealed are skipped, so repeated boots and rolling restarts
+    /// across replicas converge without coordination.
+    ///
+    /// Returns how many rows were sealed.
+    pub async fn seal_stored_keys(pool: &PgPool) -> Result<usize, TicketError> {
+        let Some(wrapper) = sealing::KeyWrapper::from_env()? else {
+            return Ok(0);
+        };
+        let rows = sqlx::query("SELECT kid, secret FROM ticket_keys WHERE encryption IS NULL")
+            .fetch_all(pool)
+            .await?;
+
+        let mut sealed_count = 0;
+        for row in &rows {
+            let kid: String = row.try_get("kid")?;
+            let secret: Vec<u8> = row.try_get("secret")?;
+            let seed: [u8; 32] = match secret.as_slice().try_into() {
+                Ok(seed) => seed,
+                Err(_) => {
+                    tracing::error!(%kid, "stored ticket key is not 32 bytes; leaving it alone");
+                    continue;
+                }
+            };
+            let sealed = wrapper.seal(&kid, &seed)?;
+            // Guarded on still being unsealed so two replicas booting at
+            // once cannot seal the same row twice — the second would be
+            // wrapping ciphertext.
+            let updated = sqlx::query(
+                "UPDATE ticket_keys SET secret = $2, encryption = $3, nonce = $4
+                 WHERE kid = $1 AND encryption IS NULL",
+            )
+            .bind(&kid)
+            .bind(&sealed.ciphertext)
+            .bind(sealed.scheme)
+            .bind(&sealed.nonce)
+            .execute(pool)
+            .await?
+            .rows_affected();
+            if updated == 1 {
+                sealed_count += 1;
+            }
+        }
+        if sealed_count > 0 {
+            tracing::info!(count = sealed_count, "sealed ticket signing keys at rest");
+        }
+        Ok(sealed_count)
     }
 
     pub fn sign_token(&self, claims: &TicketClaims) -> String {
@@ -214,11 +347,11 @@ impl TicketStore {
     /// Issue tickets for a paid order — one per seat item — and transition
     /// Paid → Ticketed, all in one transaction. Idempotent: an already
     /// Ticketed order returns its existing tickets.
-    pub async fn issue_for_order(
-        &self,
-        order_id: Uuid,
-        signer: &TicketSigner,
-    ) -> Result<Vec<IssuedTicket>, TicketError> {
+    pub async fn issue_for_order(&self, order_id: Uuid) -> Result<Vec<IssuedTicket>, TicketError> {
+        let signer = TicketSigner::active(&self.pool)
+            .await?
+            .ok_or(TicketError::NoSigningKey)?;
+        let signer = &signer;
         let mut tx = self.pool.begin().await?;
 
         let Some(order) = sqlx::query("SELECT status FROM orders WHERE id = $1 FOR UPDATE")
@@ -330,6 +463,49 @@ impl TicketStore {
 
         tx.commit().await?;
         Ok(issued)
+    }
+
+    /// Ticket ids a gate must refuse even though their signature is
+    /// perfectly valid — refunded orders, cancelled trips, voided seats.
+    ///
+    /// A signature proves a ticket was issued; it cannot prove it is still
+    /// good, because the cancellation happened after signing. Offline
+    /// devices therefore cache this alongside the key set. Scoped to trips
+    /// departing inside `horizon_hours` so the list a device carries stays
+    /// small and current rather than growing forever.
+    ///
+    /// This is revocation *detection*, bounded by how recently a device
+    /// synced — the same honest limit as clone detection. A device that
+    /// has never synced cannot know.
+    pub async fn revoked_tickets(
+        &self,
+        trip_id: Option<Uuid>,
+        horizon_hours: i64,
+    ) -> Result<Vec<Uuid>, TicketError> {
+        Ok(sqlx::query_scalar::<_, Uuid>(
+            "SELECT t.id
+             FROM tickets t
+             JOIN trips tr ON tr.id = t.trip_id
+             WHERE t.status = 'void'
+               AND (
+                 -- Asked about one departure: answer completely, whenever
+                 -- it leaves. Truncating this by a time window would hand
+                 -- a gate an empty list for a trip departing next week and
+                 -- let a refunded passenger board.
+                 ($1::uuid IS NOT NULL AND t.trip_id = $1)
+                 -- Asked about everything: bound it, or the list grows
+                 -- without limit and devices carry history they will never
+                 -- scan.
+                 OR ($1::uuid IS NULL
+                     AND tr.departs_at BETWEEN now() - interval '24 hours'
+                                           AND now() + make_interval(hours => $2))
+               )
+             ORDER BY t.id",
+        )
+        .bind(trip_id)
+        .bind(horizon_hours as i32)
+        .fetch_all(&self.pool)
+        .await?)
     }
 
     pub async fn tickets_for_order(

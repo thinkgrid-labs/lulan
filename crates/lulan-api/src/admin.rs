@@ -38,6 +38,51 @@ fn actor(staff_id: Uuid) -> Actor {
 }
 
 // ====================================================================
+// Ticket signing keys (admin)
+// ====================================================================
+
+#[derive(Serialize)]
+pub struct RotatedKey {
+    kid: String,
+    public_key: String,
+}
+
+/// POST /v1/admin/ticket-keys/rotate — mint a new signing key.
+///
+/// Takes effect immediately on every replica: issuance reads the active
+/// key per ticket rather than caching one at boot.
+///
+/// Previous keys stay published by `GET /v1/ticket-keys`, because tickets
+/// already in passengers' wallets were signed with them and must keep
+/// verifying until they expire. Rotation changes what gets signed next —
+/// it does not invalidate what was signed before. Responding to a leaked
+/// key means rotating AND revoking the tickets it signed.
+pub async fn rotate_ticket_key(
+    State(state): State<AppState>,
+    admin: AdminStaffOrKey,
+) -> Result<(StatusCode, Json<RotatedKey>), ApiError> {
+    let pool = db(&state)?;
+    let signer = lulan_engine::ticket::TicketSigner::rotate(pool)
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    audit(
+        pool,
+        admin.actor,
+        "ticket_key.rotated",
+        json!({ "kid": signer.kid }),
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.into()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(RotatedKey {
+            public_key: signer.public_key_b64(),
+            kid: signer.kid,
+        }),
+    ))
+}
+
+// ====================================================================
 // Staff enrolment (admin)
 // ====================================================================
 

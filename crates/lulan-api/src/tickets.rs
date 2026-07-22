@@ -52,12 +52,8 @@ pub async fn issue(
         .as_ref()
         .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
     crate::orders::authorize_order_access(&state, &headers, order_id, params.token()).await?;
-    let signer = state
-        .ticket_signer
-        .as_ref()
-        .ok_or(ApiError::ServiceUnavailable("ticket signing unavailable"))?;
     match TicketStore::new(pool.clone())
-        .issue_for_order(order_id, signer)
+        .issue_for_order(order_id)
         .await
     {
         Ok(tickets) => Ok(Json(TicketsResponse { order_id, tickets })),
@@ -67,6 +63,9 @@ pub async fn issue(
         Err(TicketError::NotPaid(status)) => Err(ApiError::Conflict(format!(
             "tickets require a paid order; current state is {status:?}"
         ))),
+        Err(TicketError::NoSigningKey) => {
+            Err(ApiError::ServiceUnavailable("no active ticket signing key"))
+        }
         Err(err) => Err(ApiError::Internal(err.into())),
     }
 }
@@ -88,6 +87,57 @@ pub async fn list(
         .await
         .map_err(|e| ApiError::Internal(e.into()))?;
     Ok(Json(TicketsResponse { order_id, tickets }))
+}
+
+/// How far ahead a device's revocation list reaches. Long enough to cover
+/// a shift and an overnight cache; short enough that the list stays small.
+const REVOCATION_HORIZON_HOURS: i64 = 72;
+
+#[derive(Deserialize)]
+pub struct RevocationParams {
+    /// Narrow the list to one departure — what a gate device should do.
+    /// Scoped answers are complete regardless of when the trip departs;
+    /// the unscoped list is bounded to the next few days.
+    #[serde(default)]
+    trip_id: Option<Uuid>,
+}
+
+#[derive(Serialize)]
+pub struct RevocationsResponse {
+    /// Ticket ids to refuse despite a valid signature.
+    revoked: Vec<Uuid>,
+    /// When this list was produced; a device shows staleness from it.
+    as_of: DateTime<Utc>,
+    horizon_hours: i64,
+}
+
+/// GET /v1/revocations — tickets that must be refused even though they
+/// verify (refunded orders, cancelled trips, voided seats).
+///
+/// A signature proves a ticket was issued, never that it is still good:
+/// the cancellation happens after signing, so no offline check can derive
+/// it. Devices cache this next to `GET /v1/ticket-keys` and pass it to
+/// `lulan_validate::verify_ticket_with_revocations`. Coverage is bounded
+/// by how recently the device synced — that limit is the honest one, and
+/// it is the same one clone detection lives with.
+pub async fn revocations(
+    State(state): State<AppState>,
+    _device: crate::auth::DeviceAuth,
+    Query(params): Query<RevocationParams>,
+) -> Result<Json<RevocationsResponse>, ApiError> {
+    let pool = state
+        .db
+        .as_ref()
+        .ok_or(ApiError::ServiceUnavailable("database not configured"))?;
+    let revoked = TicketStore::new(pool.clone())
+        .revoked_tickets(params.trip_id, REVOCATION_HORIZON_HOURS)
+        .await
+        .map_err(|e| ApiError::Internal(e.into()))?;
+    Ok(Json(RevocationsResponse {
+        revoked,
+        as_of: Utc::now(),
+        horizon_hours: REVOCATION_HORIZON_HOURS,
+    }))
 }
 
 #[derive(Deserialize)]

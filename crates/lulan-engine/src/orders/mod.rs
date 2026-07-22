@@ -631,8 +631,8 @@ impl OrderStore {
              WHERE (status = 'pending'   AND created_at < now() - make_interval(mins => $1))
                 OR (status = 'completed' AND created_at < now() - make_interval(hours => $2))",
         )
-        .bind(ORDER_TTL_MINUTES as f64)
-        .bind(IDEMPOTENCY_RETENTION_HOURS as f64)
+        .bind(ORDER_TTL_MINUTES as i32)
+        .bind(IDEMPOTENCY_RETENTION_HOURS as i32)
         .execute(&self.pool)
         .await?
         .rows_affected();

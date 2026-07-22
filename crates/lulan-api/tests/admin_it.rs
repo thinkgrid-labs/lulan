@@ -9,6 +9,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{Duration, Utc};
 use lulan_api::state::AppState;
+use lulan_validate::{KeyEntry, ValidationError, verify_ticket, verify_ticket_with_revocations};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -492,6 +493,42 @@ async fn admin_operations_run_the_business_with_only_idp_tokens() {
     assert_eq!(
         scans["outcomes"][0]["status"], "void",
         "a refunded ticket reads as void at the gate, not already_boarded: {scans}"
+    );
+
+    // Online, the server catches it. OFFLINE, the signature is still
+    // perfectly valid — cancellation happened after signing, so no amount
+    // of cryptography reveals it. The gate needs the revocation list.
+    let (status, revs) = call(
+        &app,
+        "GET",
+        &format!("/v1/revocations?trip_id={}", trip_ids[0]),
+        None,
+        Some(API_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{revs}");
+    let revoked: Vec<Uuid> = serde_json::from_value(revs["revoked"].clone()).unwrap();
+    assert!(
+        revoked.contains(&voided_ticket),
+        "a refunded ticket must appear on the list devices carry: {revs}"
+    );
+
+    let (_, keys) = call(&app, "GET", "/v1/ticket-keys", None, Some(API_KEY)).await;
+    let keys: Vec<KeyEntry> = serde_json::from_value(keys["keys"].clone()).unwrap();
+    let token: String = sqlx::query_scalar("SELECT token FROM tickets WHERE id = $1")
+        .bind(voided_ticket)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let now = Utc::now().timestamp();
+    assert!(
+        verify_ticket(&token, &keys, now, None).is_ok(),
+        "signature alone cannot detect a refund — that is the whole problem"
+    );
+    assert_eq!(
+        verify_ticket_with_revocations(&token, &keys, now, None, &revoked),
+        Err(ValidationError::Revoked),
+        "with the synced list, the gate refuses it"
     );
     let by_sunny: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_log a JOIN staff s ON s.id = a.staff_id

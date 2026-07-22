@@ -27,9 +27,6 @@ pub struct AppState {
     pub payments: Arc<dyn PaymentProvider>,
     /// HMAC key for quote tokens.
     pub quote_secret: Arc<Vec<u8>>,
-    /// Ed25519 ticket signer, loaded/created at boot when a database is
-    /// configured. None = ticket issuance returns 503.
-    pub ticket_signer: Option<Arc<lulan_engine::ticket::TicketSigner>>,
     /// Customer identity port (operator's IdP). None = guest checkout
     /// only; customer endpoints return 401.
     pub identity: Option<Arc<dyn crate::identity::IdentityProvider>>,
@@ -40,16 +37,13 @@ impl AppState {
     /// and infra-less boots want. Loads/creates the ticket signing key
     /// when a database is present.
     pub async fn new(db: Option<PgPool>, redis: Option<ConnectionManager>) -> Self {
-        let ticket_signer = match &db {
-            Some(pool) => match lulan_engine::ticket::TicketSigner::load_or_create(pool).await {
-                Ok(signer) => Some(Arc::new(signer)),
-                Err(err) => {
-                    tracing::error!(error = %err, "ticket signer unavailable");
-                    None
-                }
-            },
-            None => None,
-        };
+        // Ensure a signing key exists; issuance reads the ACTIVE key at
+        // sign time so rotation lands without a restart.
+        if let Some(pool) = &db
+            && let Err(err) = lulan_engine::ticket::TicketSigner::load_or_create(pool).await
+        {
+            tracing::error!(error = %err, "ticket signing key unavailable");
+        }
         let identity: Option<Arc<dyn crate::identity::IdentityProvider>> =
             crate::identity::HsJwtIdentity::from_env()
                 .map(|provider| Arc::new(provider) as Arc<dyn crate::identity::IdentityProvider>);
@@ -59,7 +53,6 @@ impl AppState {
             pricing: Arc::new(NativeEngine),
             payments: Arc::new(FakeProvider),
             quote_secret: Arc::new(ephemeral_secret()),
-            ticket_signer,
             identity,
         }
     }

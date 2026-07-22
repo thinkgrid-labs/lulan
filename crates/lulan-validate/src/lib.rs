@@ -13,9 +13,20 @@
 //!
 //! What a signature does and doesn't prove (the honest threat model): a
 //! valid signature proves the ticket was issued by the operator and not
-//! altered. It cannot prove the QR wasn't *cloned* — same-device re-scans
-//! are rejected by the device's local seen-set, and cross-device
-//! duplicates are detected server-side when scan journals sync.
+//! altered. It proves nothing about what happened afterwards.
+//!
+//! Two things happen afterwards, and neither is visible in the signature:
+//!
+//! - **Cloning.** Same-device re-scans are rejected by the device's local
+//!   seen-set; cross-device duplicates are detected server-side when scan
+//!   journals sync.
+//! - **Revocation.** A refunded or cancelled ticket keeps verifying until
+//!   it expires, because the cancellation happened after signing. Devices
+//!   cache a revocation list from `GET /v1/revocations` alongside the key
+//!   set and pass it to [`verify_ticket_with_revocations`]. That is
+//!   revocation *detection*, bounded by how recently the device synced —
+//!   a device that has never synced cannot know, and no amount of
+//!   cryptography changes that.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -91,16 +102,39 @@ pub enum ValidationError {
     Expired { expired_at_unix: i64 },
     #[error("ticket is for a different trip")]
     WrongTrip,
+    #[error("ticket was revoked (refunded or cancelled)")]
+    Revoked,
 }
 
 /// Verify a scanned token against cached public keys. `expected_trip`
 /// pins validation to the trip being boarded (recommended); pass `None`
 /// for a generic inspection scan.
+///
+/// Signature-only: a ticket refunded after issuance still passes here.
+/// Gates should use [`verify_ticket_with_revocations`] with the list from
+/// their last sync.
 pub fn verify_ticket(
     token: &str,
     keys: &[KeyEntry],
     now_unix: i64,
     expected_trip: Option<Uuid>,
+) -> Result<VerifiedTicket, ValidationError> {
+    verify_ticket_with_revocations(token, keys, now_unix, expected_trip, &[])
+}
+
+/// Verify, and additionally refuse anything the operator has revoked
+/// since it was signed.
+///
+/// `revoked` is whatever the device last pulled from `GET /v1/revocations`
+/// — ticket ids for trips departing soon. Checked last, so a revoked
+/// ticket that is also expired or for the wrong trip still reports the
+/// more specific problem.
+pub fn verify_ticket_with_revocations(
+    token: &str,
+    keys: &[KeyEntry],
+    now_unix: i64,
+    expected_trip: Option<Uuid>,
+    revoked: &[Uuid],
 ) -> Result<VerifiedTicket, ValidationError> {
     let rest = token
         .strip_prefix("LT1.")
@@ -148,6 +182,9 @@ pub fn verify_ticket(
         && claims.trp != expected
     {
         return Err(ValidationError::WrongTrip);
+    }
+    if revoked.contains(&claims.tid) {
+        return Err(ValidationError::Revoked);
     }
 
     Ok(VerifiedTicket {

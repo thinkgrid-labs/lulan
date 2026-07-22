@@ -41,6 +41,11 @@ services:
       REDIS_URL: ${REDIS_URL:-}
       LULAN_LISTEN_ADDR: 0.0.0.0:8080
       LULAN_QUOTE_SECRET: ${LULAN_QUOTE_SECRET:?set LULAN_QUOTE_SECRET in .env}
+      # Encrypts ticket signing keys at rest, so a database dump cannot
+      # forge boarding passes. Unset = keys stored in the clear. Set it and
+      # restart to seal existing keys in place. Losing it costs only the
+      # ability to sign NEW tickets — rotate to recover.
+      LULAN_TICKET_KEY_ENCRYPTION_KEY: ${LULAN_TICKET_KEY_ENCRYPTION_KEY:-}
       LULAN_BOOTSTRAP_ADMIN_KEY: ${LULAN_BOOTSTRAP_ADMIN_KEY:?set LULAN_BOOTSTRAP_ADMIN_KEY in .env}
       # Optional: customer identity (HS256 JWT from your IdP)
       LULAN_IDP_ISSUER: ${LULAN_IDP_ISSUER:-}

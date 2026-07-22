@@ -200,6 +200,50 @@ async fn offline_ticket_flow_from_booking_to_boarded() {
     .await;
     assert_eq!(reissued["tickets"].as_array().unwrap().len(), 2);
 
+    // ---- Key rotation ------------------------------------------------
+    // Rotating must not strand tickets already in wallets: the retired
+    // key stays published, so what it signed keeps verifying. It changes
+    // what gets signed NEXT, and does so without a restart.
+    let signed_kid = {
+        let keys: Vec<KeyEntry> = serde_json::from_value(
+            call(&app, "GET", "/v1/ticket-keys", None).await.1["keys"].clone(),
+        )
+        .unwrap();
+        let token = tickets[0]["token"].as_str().unwrap();
+        verify_ticket(token, &keys, Utc::now().timestamp(), Some(trip_id))
+            .unwrap()
+            .kid
+    };
+    let (status, rotated) = call_with_key(
+        &app,
+        "POST",
+        "/v1/admin/ticket-keys/rotate",
+        Some(json!({})),
+        Some(INTEGRATION_KEY),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{rotated}");
+    let new_kid = rotated["kid"].as_str().unwrap();
+    assert_ne!(new_kid, signed_kid, "rotation must mint a distinct key");
+
+    let (_, keys_after) = call(&app, "GET", "/v1/ticket-keys", None).await;
+    let keys_after: Vec<KeyEntry> = serde_json::from_value(keys_after["keys"].clone()).unwrap();
+    assert!(
+        keys_after.iter().any(|k| k.kid == signed_kid),
+        "the retired key must stay published or issued tickets die with it"
+    );
+    assert!(keys_after.iter().any(|k| k.kid == new_kid));
+    assert!(
+        verify_ticket(
+            tickets[0]["token"].as_str().unwrap(),
+            &keys_after,
+            Utc::now().timestamp(),
+            Some(trip_id),
+        )
+        .is_ok(),
+        "an already-issued ticket must survive rotation"
+    );
+
     // ---- OFFLINE from here: cache the key set, then no server calls ----
     let (status, keys_body) = call(&app, "GET", "/v1/ticket-keys", None).await;
     assert_eq!(status, StatusCode::OK);

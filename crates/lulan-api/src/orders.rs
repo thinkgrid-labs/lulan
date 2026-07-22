@@ -729,11 +729,11 @@ pub async fn payment_webhook(
     };
 
     if matches!(outcome, TransitionOutcome::Applied(OrderStatus::Paid))
-        && let (Some(pool), Some(signer)) = (&state.db, &state.ticket_signer)
+        && let Some(pool) = &state.db
         && let Some(order_id) = orders.find_by_intent(&payment_intent_id).await?
     {
         match TicketStore::new(pool.clone())
-            .issue_for_order(order_id, signer)
+            .issue_for_order(order_id)
             .await
         {
             Ok(tickets) => {

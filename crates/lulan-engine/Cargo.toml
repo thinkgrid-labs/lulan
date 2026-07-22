@@ -10,10 +10,12 @@ authors.workspace = true
 
 [dependencies]
 base64 = { workspace = true }
+chacha20poly1305 = { workspace = true }
 chrono = { workspace = true }
 ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
 hmac = { workspace = true }
+rand = { workspace = true }
 redis = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }

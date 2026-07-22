@@ -234,12 +234,17 @@ async fn main() -> anyhow::Result<()> {
         (None, None) => lulan_api::state::ephemeral_secret(),
     });
 
-    let ticket_signer = match &db {
-        Some(pool) => Some(std::sync::Arc::new(
-            lulan_engine::ticket::TicketSigner::load_or_create(pool).await?,
-        )),
-        None => None,
-    };
+    // Make sure a signing key exists before serving. Issuance reads the
+    // active key per ticket, so `POST /v1/admin/ticket-keys/rotate` takes
+    // effect on every replica immediately.
+    if let Some(pool) = &db {
+        // Wrap anything still stored in the clear before touching it, so
+        // an operator adopts encryption by setting the env var and
+        // restarting.
+        lulan_engine::ticket::TicketSigner::seal_stored_keys(pool).await?;
+        let signer = lulan_engine::ticket::TicketSigner::load_or_create(pool).await?;
+        tracing::info!(kid = %signer.kid, "ticket signing key active");
+    }
 
     // Customer identity port: HS256 JWT adapter when configured.
     let identity: Option<std::sync::Arc<dyn lulan_api::identity::IdentityProvider>> =
@@ -260,7 +265,6 @@ async fn main() -> anyhow::Result<()> {
         pricing,
         payments,
         quote_secret,
-        ticket_signer,
         identity,
     });
 
