@@ -492,6 +492,12 @@ pub struct SeatSpec {
 pub struct PoolSpec {
     code: String,
     capacity: i32,
+    /// One admitted person per unit (general admission, foot passengers) —
+    /// each claimed unit gets a bearer boarding pass. Defaults to false for
+    /// bulk pools (cargo kilograms, vehicle-deck slots), which carry no
+    /// per-unit ticket.
+    #[serde(default)]
+    admission: bool,
 }
 
 #[derive(Deserialize)]
@@ -550,13 +556,14 @@ pub async fn create_vessel(
     }
     for pool_spec in &req.pools {
         sqlx::query(
-            "INSERT INTO capacity_units (id, resource_id, kind, code, pool_capacity)
-             VALUES ($1, $2, 'pool', $3, $4)",
+            "INSERT INTO capacity_units (id, resource_id, kind, code, pool_capacity, admission)
+             VALUES ($1, $2, 'pool', $3, $4, $5)",
         )
         .bind(Uuid::new_v4())
         .bind(id)
         .bind(pool_spec.code.trim())
         .bind(pool_spec.capacity)
+        .bind(pool_spec.admission)
         .execute(&mut *tx)
         .await
         .map_err(|e| ApiError::Internal(e.into()))?;

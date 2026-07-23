@@ -24,7 +24,13 @@ async fn main() -> anyhow::Result<()> {
             .database_url
             .context("DATABASE_URL is required for seeding")?;
         let pool = connect(&url).await?;
-        seed::seed(&pool).await?;
+        // `seed events` seeds the arena/concert profile (its own ruleset);
+        // `seed` seeds the ferry line. Same engine, different domain.
+        if std::env::args().nth(2).as_deref() == Some("events") {
+            seed::seed_events(&pool).await?;
+        } else {
+            seed::seed(&pool).await?;
+        }
         return Ok(());
     }
 

@@ -36,6 +36,25 @@ use crate::inventory::StoreError;
 /// delays).
 const VALIDITY_AFTER_DEPARTURE_HOURS: i64 = 24;
 
+/// "GENERAL_ADMISSION" → "General Admission". Turns a pool's unit code
+/// into a bearer-holder label for the gate display; leaves already-spaced
+/// or mixed-case codes readable.
+fn humanize(code: &str) -> String {
+    code.split(['_', ' '])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The signed claims. Short serde names keep the CBOR payload compact for
 /// low-error-correction QR codes. THIS IS A WIRE CONTRACT shared with
 /// lulan-validate — never change field meanings, only add.
@@ -444,8 +463,103 @@ impl TicketStore {
             });
         }
 
-        // Paid → Ticketed (cargo-only orders ticket trivially with zero
-        // passenger tickets — their receipt story is post-v1).
+        // Admission pools are bearer tickets: a pool line is order-level
+        // with a quantity, and each admission is its own scannable QR.
+        // Concert general admission and ferry foot passengers are the same
+        // shape — capacity sold by the count, not the named seat. Each
+        // admission gets a fresh bearer passenger so the (order, trip,
+        // passenger, unit) uniqueness that stops a seat being double-issued
+        // also stops a GA quantity being issued twice. Bulk pools (cargo
+        // kilograms, vehicle-deck slots) are not admissions and issue no
+        // per-unit tickets — the `admission` flag draws the line.
+        let pool_items = sqlx::query(
+            "SELECT oi.trip_id, oi.unit_id, oi.unit_code, oi.from_index, oi.to_index,
+                    oi.quantity, cu.fare_class, t.departs_at
+             FROM order_items oi
+             JOIN capacity_units cu ON cu.id = oi.unit_id
+             JOIN trips t ON t.id = oi.trip_id
+             WHERE oi.order_id = $1 AND oi.kind = 'pool' AND cu.admission
+             ORDER BY t.departs_at, oi.unit_code",
+        )
+        .bind(order_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for row in &pool_items {
+            let quantity: i32 = row.try_get("quantity")?;
+            let unit_id: Uuid = row.try_get("unit_id")?;
+            let unit_code: String = row.try_get("unit_code")?;
+            let trip_id: Uuid = row.try_get("trip_id")?;
+            let departs_at: DateTime<Utc> = row.try_get("departs_at")?;
+            let fare_class: Option<String> = row.try_get("fare_class")?;
+            let from_index = row.try_get::<i16, _>("from_index")? as u8;
+            let to_index = row.try_get::<i16, _>("to_index")? as u8;
+            let exp = (departs_at + Duration::hours(VALIDITY_AFTER_DEPARTURE_HOURS)).timestamp();
+            // A bearer holder label, shown at the gate in the passenger
+            // slot: "GENERAL_ADMISSION" reads as "General Admission".
+            let label = humanize(&unit_code);
+
+            for _ in 0..quantity.max(0) {
+                let passenger_id = Uuid::new_v4();
+                sqlx::query(
+                    "INSERT INTO passengers (id, order_id, full_name, passenger_type)
+                     VALUES ($1, $2, $3, 'adult')",
+                )
+                .bind(passenger_id)
+                .bind(order_id)
+                .bind(&label)
+                .execute(&mut *tx)
+                .await?;
+
+                let ticket_id = Uuid::new_v4();
+                let claims = TicketClaims {
+                    v: 1,
+                    tid: ticket_id,
+                    trp: trip_id,
+                    unt: unit_code.clone(),
+                    f: from_index,
+                    t: to_index,
+                    pax: label.clone(),
+                    fc: fare_class.clone(),
+                    exp,
+                    kid: signer.kid.clone(),
+                };
+                let token = signer.sign_token(&claims);
+
+                sqlx::query(
+                    "INSERT INTO tickets (id, order_id, passenger_id, trip_id, unit_id, token, kid)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(ticket_id)
+                .bind(order_id)
+                .bind(passenger_id)
+                .bind(trip_id)
+                .bind(unit_id)
+                .bind(&token)
+                .bind(&signer.kid)
+                .execute(&mut *tx)
+                .await?;
+
+                issued_json.push(json!({
+                    "ticket_id": ticket_id,
+                    "passenger_id": passenger_id,
+                    "trip_id": trip_id,
+                    "unit_code": unit_code,
+                }));
+                issued.push(IssuedTicket {
+                    ticket_id,
+                    passenger_id,
+                    passenger_name: label.clone(),
+                    unit_code: unit_code.clone(),
+                    status: "issued".into(),
+                    token,
+                });
+            }
+        }
+
+        // Paid → Ticketed. An order with neither seats nor pool admissions
+        // (a pure ancillary/cargo receipt) still transitions, with zero
+        // tickets.
         let next = apply(Some(status), OrderEventType::TicketIssued)
             .expect("paid → ticketed is a legal transition");
         sqlx::query("UPDATE orders SET status = $2, updated_at = now() WHERE id = $1")
@@ -655,5 +769,19 @@ impl TicketStore {
             status: "boarded",
             order_status,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::humanize;
+
+    #[test]
+    fn humanize_makes_pool_codes_readable() {
+        assert_eq!(humanize("GENERAL_ADMISSION"), "General Admission");
+        assert_eq!(humanize("FOOT_PASSENGER"), "Foot Passenger");
+        assert_eq!(humanize("vip"), "Vip");
+        assert_eq!(humanize("Lawn  Access"), "Lawn Access");
+        assert_eq!(humanize(""), "");
     }
 }

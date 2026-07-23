@@ -375,6 +375,25 @@ Lulan models any business that reserves **capacity over space and time**: region
 
 **Standalone mode** fits operators without a sophisticated backend — provincial bus lines, ferry and tourism operators, shuttles, charters, small regional airlines: Lulan is the whole system, from search to boarding. **Orchestrated mode** fits enterprises with existing operational platforms: Lulan owns discovery → pricing → cart → payment → confirmed reservation, then a Reservation Sync Connector pushes it into the PSS / manifest system / dispatch backend (planned; today's HMAC-signed webhooks already enable the same integration DIY). Same API and domain model either way — only the connector changes.
 
+### Not just ferries — same engine, one domain per deployment
+
+The primitives are domain-agnostic: **seats** (reserved, fare-classed), **pools** (capacity sold by the count), and **segments** (a claim spans `[from, to)`). A ferry is the many-segment case; a live event is the one-segment case. Nothing in the engine knows the difference.
+
+A concert in an arena maps straight onto them:
+
+| Transit concept | Concert equivalent |
+| --- | --- |
+| Vehicle / vessel | The venue (the arena) |
+| Fare-class seats | Reserved sections — VIP, lower box, upper box |
+| Pool capacity | General admission (an **admission** pool: one bearer QR per unit) |
+| Route stops → segments | Doors → end — a single segment |
+| A departure (trip) | One show night |
+| Signed QR boarding pass | The ticket scanned at the gate |
+
+`lulan-api seed events` seeds exactly that arena show — priced in USD — and the **same eight API calls** from the [ferry quickstart](QUICKSTART.md) sell a VIP seat plus two general-admission tickets and validate them offline at the gate. See [`QUICKSTART-events.md`](QUICKSTART-events.md).
+
+One important boundary: a Lulan deployment serves **one domain**. The active fare ruleset is global (exactly one at a time), so `seed` gives you a *ferry* deployment and `seed events` gives you a *separate concert* deployment in its own database — you never run both in one instance. "Not just ferries" means the same engine and API deploy for either; it does not mean one instance sells both. Pooled admission also distinguishes people from freight: general admission and foot passengers issue one boarding pass per unit, while bulk pools (cargo kilograms, vehicle-deck slots) issue none.
+
 ## Contributing
 
 Lulan is developed in the open and welcomes issues, design discussions, and pull requests. Contribution guidelines and architecture decision records will be published as the project approaches its first release.
@@ -394,4 +413,4 @@ its retaliation clause applies to anyone who sues over it.
 
 **Keywords**: open-source reservation system · headless booking engine · reservation orchestration platform · airline reservation system · bus booking system · ferry reservation software · rail ticketing · seat reservation API · segment inventory · Rust booking engine · offline ticket validation · QR ticketing · WebAssembly pricing
 
-*Lulan aims to be the open-source foundation for capacity reservation worldwide — bringing modern developer tooling to an industry still dominated by legacy software. The name comes from the Filipino word for "to board, to load." Transportation is only the beginning.*
+*Lulan aims to be the open-source foundation for capacity reservation worldwide — bringing modern developer tooling to an industry still dominated by legacy software. The name comes from the Filipino word for "to board, to load."

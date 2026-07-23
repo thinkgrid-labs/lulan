@@ -441,3 +441,209 @@ async fn seed_return_route(pool: &PgPool) -> anyhow::Result<()> {
     println!("seeded return route: CEB→ILO→CTC→BTG, {DAYS} daily departures");
     Ok(())
 }
+
+// ===========================================================================
+// Events profile — a concert at an arena.
+//
+// The SAME engine as the ferry line, proving the capacity primitive is not
+// transit-specific. An event is the one-segment case: the whole show is a
+// single span "DOORS → END" (segment_count = 1). Seated sections are fare
+// classes; general admission is a pool. Nothing in the engine changes —
+// only the seed.
+//
+// Self-contained (its own active fare ruleset), so run it against its own
+// database: `lulan-api seed events`. The active ruleset is global, so this
+// and the ferry demo do not share a database.
+// ===========================================================================
+
+/// Show sections: (code prefix, fare class, seat count).
+const ARENA_SECTIONS: [(&str, &str, u32); 3] = [
+    ("VIP", "vip", 20),
+    ("LOWER", "lower_box", 40),
+    ("UPPER", "upper_box", 40),
+];
+const ARENA_GA_CAPACITY: i32 = 5000;
+
+pub async fn seed_events(pool: &PgPool) -> anyhow::Result<()> {
+    // The show's fare policy — priced per (single) segment, so it is just
+    // the ticket price. General admission is priced by its pool code.
+    let rules = serde_json::json!({
+        "currency": "USD",
+        "base_fare_per_segment": {
+            "vip": 25_000,
+            "lower_box": 12_000,
+            "upper_box": 7_500,
+            "GENERAL_ADMISSION": 4_500,
+        },
+        // Weekend nights run hotter; a near-sold-out show adds a demand tier.
+        "peak_weekdays": [4, 5, 6],
+        "peak_surcharge_bp": 1_000,
+        "occupancy_tiers": [{"min_occupancy_bp": 8_000, "surcharge_bp": 1_500}],
+        "advance_purchase_tiers": [{"min_days": 14, "discount_bp": 1_000}],
+        "promos": {"EARLYBIRD": 1_500},
+        "round_trip_discount_bp": 0,
+        "passenger_type_discounts": {
+            "child": 5_000,
+            "senior": 2_000,
+            "pwd": 2_000,
+            "infant": 10_000,
+        },
+    });
+    // Same fail-fast schema check as the ferry rules.
+    let _: lulan_pricing::rules::FareRuleSet = serde_json::from_value(rules.clone())?;
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SEED_LOCK)
+        .execute(&mut *tx)
+        .await?;
+
+    let already =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM routes WHERE code = 'ARENA-SHOW'")
+            .fetch_one(&mut *tx)
+            .await?;
+    if already > 0 {
+        tx.commit().await?;
+        println!("events demo already seeded");
+        return Ok(());
+    }
+
+    // Its own active ruleset (the active ruleset is global).
+    sqlx::query("UPDATE fare_rules SET active = false WHERE active")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO fare_rules (id, active, rules) VALUES ($1, true, $2)")
+        .bind(Uuid::new_v4())
+        .bind(rules)
+        .execute(&mut *tx)
+        .await?;
+
+    // Two "stops" bound the single span of the show.
+    let mut loc_ids = Vec::new();
+    for (code, name) in [("DOORS", "Doors open"), ("END", "Show ends")] {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO locations (id, code, name, timezone) VALUES ($1, $2, $3, 'Asia/Manila')",
+        )
+        .bind(id)
+        .bind(code)
+        .bind(name)
+        .execute(&mut *tx)
+        .await?;
+        loc_ids.push(id);
+    }
+
+    let operator_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO operators (id, code, name) VALUES ($1, 'SRN', 'Sirena Live')")
+        .bind(operator_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let route_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO routes (id, code, name) VALUES ($1, 'ARENA-SHOW', 'Sirena Live at the Big Dome')",
+    )
+    .bind(route_id)
+    .execute(&mut *tx)
+    .await?;
+    for (index, loc_id) in loc_ids.iter().enumerate() {
+        // Doors at 0, show ends 180 min later. One segment.
+        let (arrive, depart) = [(0, 0), (180, 180)][index];
+        sqlx::query(
+            "INSERT INTO route_stops (route_id, stop_index, location_id, arrive_offset_min, depart_offset_min)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(route_id)
+        .bind(index as i16)
+        .bind(loc_id)
+        .bind(arrive)
+        .bind(depart)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    // The arena: seated sections (fare classes) + one general-admission pool.
+    let resource_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO resources (id, code, name, kind) VALUES ($1, 'ARENA-1', 'The Big Dome', 'other')")
+        .bind(resource_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let mut seat_ids = Vec::new();
+    for (prefix, fare_class, n) in ARENA_SECTIONS {
+        for i in 1..=n {
+            let id = Uuid::new_v4();
+            let code = format!("{prefix}-{i}");
+            sqlx::query(
+                "INSERT INTO capacity_units (id, resource_id, kind, code, fare_class)
+                 VALUES ($1, $2, 'seat', $3, $4)",
+            )
+            .bind(id)
+            .bind(resource_id)
+            .bind(&code)
+            .bind(fare_class)
+            .execute(&mut *tx)
+            .await?;
+            seat_ids.push((id, code));
+        }
+    }
+    let ga_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO capacity_units (id, resource_id, kind, code, pool_capacity, admission)
+         VALUES ($1, $2, 'pool', 'GENERAL_ADMISSION', $3, true)",
+    )
+    .bind(ga_id)
+    .bind(resource_id)
+    .bind(ARENA_GA_CAPACITY)
+    .execute(&mut *tx)
+    .await?;
+
+    // Three show nights, all future so they're bookable, doors 20:00 local.
+    let today = Utc::now().date_naive();
+    for (idx, day) in [2i64, 3, 4].into_iter().enumerate() {
+        let service_date = today + Duration::days(day);
+        let departs_at = service_date
+            .and_time(NaiveTime::from_hms_opt(12, 0, 0).context("valid time")?)
+            .and_utc();
+        let trip_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO trips (id, route_id, resource_id, operator_id, service_number, service_date, departs_at, segment_count)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 1)",
+        )
+        .bind(trip_id)
+        .bind(route_id)
+        .bind(resource_id)
+        .bind(operator_id)
+        .bind(format!("NIGHT {}", idx + 1))
+        .bind(service_date)
+        .bind(departs_at)
+        .execute(&mut *tx)
+        .await?;
+
+        for (seat_id, _) in &seat_ids {
+            sqlx::query(
+                "INSERT INTO seat_occupancy (trip_id, unit_id, occupied_mask) VALUES ($1, $2, 0)",
+            )
+            .bind(trip_id)
+            .bind(seat_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        // One segment, so the remaining array has length 1.
+        sqlx::query(
+            "INSERT INTO pool_occupancy (trip_id, unit_id, remaining)
+             VALUES ($1, $2, array_fill($3::int, ARRAY[1]))",
+        )
+        .bind(trip_id)
+        .bind(ga_id)
+        .bind(ARENA_GA_CAPACITY)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    println!(
+        "seeded events demo: Sirena Live at the Big Dome — 100 seats (VIP/lower/upper) + {ARENA_GA_CAPACITY} GA, 3 nights"
+    );
+    Ok(())
+}

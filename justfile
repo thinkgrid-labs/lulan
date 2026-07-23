@@ -19,6 +19,20 @@ serve:
     LULAN_QUOTE_SECRET=dev-only-quote-secret-not-for-production \
     cargo run -p lulan-api
 
+# Seed + serve the events (concert) profile in its OWN database. A Lulan
+# deployment serves one domain — the events fare ruleset is global — so
+# this never touches the ferry `lulan` database.
+serve-events:
+    docker compose -f deploy/compose/dev.yml exec -T postgres \
+        psql -U lulan -d postgres -c "CREATE DATABASE lulan_events" || true
+    DATABASE_URL=postgres://lulan:lulan@localhost:5432/lulan_events \
+        cargo run -p lulan-api seed events
+    DATABASE_URL=postgres://lulan:lulan@localhost:5432/lulan_events \
+    REDIS_URL=redis://localhost:6379 \
+    LULAN_QUOTE_SECRET=dev-only-quote-secret-not-for-production \
+    LULAN_BOOTSTRAP_ADMIN_KEY=llk_events_admin_key \
+    cargo run -p lulan-api
+
 # Format, lint, test — what CI runs
 check:
     cargo fmt --all -- --check
