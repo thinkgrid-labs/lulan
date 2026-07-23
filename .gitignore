@@ -12,8 +12,7 @@ dist/
 !.env.example
 .DS_Store
 
-# Internal docs stay local; the benchmarks doc is public (cited in README)
+# Internal docs stay local; the benchmarks doc is public (cited in README).
+# docs/launch/ (GTM notes, video script, post drafts) is internal too.
 docs/*
 !docs/benchmarks.md
-!docs/launch/
-!docs/launch/**

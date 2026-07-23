@@ -6,8 +6,11 @@
     "the process environment.",
     "",
     "Placeholders available in field templates: {order_id},",
-    "{amount_minor}, {currency}, {currency_lower}, {currency_upper},",
-    "{payment_intent_id}.",
+    "{amount_minor} (integer, the currency's minor unit — what Stripe and",
+    "most APIs want), {amount_decimal} (major-unit string like '450.00',",
+    "'5000' for JPY, '5.000' for BHD — what PayPal-style gateways want),",
+    "{amount_major} (integer major unit), {currency}, {currency_lower},",
+    "{currency_upper}, {payment_intent_id}.",
     "",
     "Built-in presets need none of this — LULAN_PAYMENT_PROVIDER=stripe",
     "plus the two secrets is a complete integration. Copy this file when",
@@ -30,7 +33,8 @@
     "path": "/v1/charges",
     "//fields": [
       "Dotted keys nest in JSON mode. A value that is exactly",
-      "{amount_minor} is sent as a number; everything else as a string."
+      "{amount_minor} and {amount_major} are sent as numbers;",
+      "{amount_decimal} and everything else as a string."
     ],
     "fields": {
       "amount": "{amount_minor}",

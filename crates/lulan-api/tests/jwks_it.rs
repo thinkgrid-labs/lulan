@@ -101,6 +101,41 @@ async fn jwks_provider_accepts_real_tokens_and_refuses_near_misses() {
         );
     }
 
+    // Algorithm confusion: publish the RSA key with NO `alg` (spec-legal),
+    // then present an HS256 token signed with the RSA *public* material as
+    // the HMAC secret. Must be refused by the alg-family check, not
+    // accepted because the JWK didn't pin an algorithm.
+    {
+        let addr2 = stub_idp(json!({"keys": [{
+            "kty": "RSA", "use": "sig", "kid": "no-alg-key",
+            "n": MODULUS, "e": EXPONENT,
+        }]}))
+        .await;
+        let provider2 = JwksIdentity::connect(
+            ISSUER.to_string(),
+            format!("http://{addr2}/jwks.json"),
+            None,
+        )
+        .await
+        .expect("key set loads without an alg field");
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        header.kid = Some("no-alg-key".to_string());
+        // The "secret" is the raw modulus bytes — the classic confusion.
+        let forged_hs = jsonwebtoken::encode(
+            &header,
+            &valid_claims(),
+            &jsonwebtoken::EncodingKey::from_secret(
+                &base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, MODULUS)
+                    .unwrap(),
+            ),
+        )
+        .unwrap();
+        assert!(
+            provider2.verify(&forged_hs).is_none(),
+            "an HS256 token against an RSA JWK must be refused (alg confusion)"
+        );
+    }
+
     // Signed with a real but unpublished key, under a kid that IS
     // published. The signature is perfectly well-formed — which is
     // exactly why it must be checked against the right key. This was

@@ -359,6 +359,17 @@ async fn an_arbitrary_provider_needs_no_rust() {
     ));
 }
 
+/// The shipped example config is documentation operators copy — it must
+/// parse, or the docs lie. (It broke once from a stray edit; this catches
+/// that class.)
+#[test]
+fn shipped_example_config_parses() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../deploy/payment-providers/example.json");
+    let source = std::fs::read_to_string(&path).expect("example.json is readable");
+    ProviderConfig::from_json(&source).expect("deploy/payment-providers/example.json parses");
+}
+
 #[test]
 fn shipped_presets_all_parse() {
     for name in preset::NAMES {

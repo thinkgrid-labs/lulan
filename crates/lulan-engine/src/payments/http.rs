@@ -93,8 +93,12 @@ pub struct Call {
     pub path: String,
     /// Body fields. Values are templates (see [`render`]); in JSON mode a
     /// dotted key nests (`"metadata.order_id"`), and a value that is
-    /// exactly `{amount_minor}` is emitted as a number rather than a
-    /// string.
+    /// exactly `{amount_minor}` or `{amount_major}` is emitted as a number.
+    ///
+    /// Amount placeholders: `{amount_minor}` (integer minor unit — Stripe
+    /// and most; no conversion), `{amount_decimal}` (major-unit string,
+    /// exponent-aware: `"450.00"`, `"5000"` for JPY, `"5.000"` for BHD —
+    /// PayPal-style gateways), `{amount_major}` (integer major unit).
     #[serde(default)]
     pub fields: BTreeMap<String, String>,
     /// RFC 6901 JSON pointer to the provider's id for the intent in the
@@ -395,7 +399,11 @@ impl PaymentProvider for HttpProvider {
                 amount_minor,
                 currency: "",
                 payment_intent_id,
-                idempotency_key: format!("refund-{payment_intent_id}"),
+                // The amount is part of the key so a partial refund and a
+                // later, different partial refund of the same intent are
+                // distinct requests. A fixed per-intent key would make the
+                // second one replay the first and silently not refund.
+                idempotency_key: format!("refund-{payment_intent_id}-{amount_minor}"),
             };
             self.post(&self.config.refund, &vars).await?;
             Ok(())
@@ -466,11 +474,63 @@ struct Vars<'a> {
     idempotency_key: String,
 }
 
+/// ISO 4217 fractional digits for a currency, so the adapter can present
+/// the amount the way each PSP expects. Lulan stores money in ONE internal
+/// unit (the ISO minor unit) everywhere; this only affects what crosses the
+/// wire to a provider.
+///
+/// Stripe and most modern APIs want the minor unit as an integer, which is
+/// what Lulan already holds, so `{amount_minor}` needs no conversion. But
+/// plenty of gateways (PayPal, many regional processors) want a major-unit
+/// decimal string (`"450.00"`), and for that the exponent has to be right —
+/// `¥5000` is `"5000"`, not `"50.00"`, and `BD 5` is `"5.000"`.
+///
+/// The lists are the standard exceptions; everything unlisted is 2.
+pub fn iso_exponent(currency: &str) -> u32 {
+    match currency.to_uppercase().as_str() {
+        // Zero-decimal: minor unit == major unit.
+        "BIF" | "CLP" | "DJF" | "GNF" | "ISK" | "JPY" | "KMF" | "KRW" | "PYG" | "RWF" | "UGX"
+        | "VND" | "VUV" | "XAF" | "XOF" | "XPF" => 0,
+        // Three-decimal.
+        "BHD" | "IQD" | "JOD" | "KWD" | "LYD" | "OMR" | "TND" => 3,
+        _ => 2,
+    }
+}
+
+/// Format `amount_minor` as a major-unit decimal string for the currency,
+/// e.g. `45000` PHP → `"450.00"`, `5000` JPY → `"5000"`, `5000` BHD →
+/// `"5.000"`.
+fn amount_decimal(amount_minor: i64, currency: &str) -> String {
+    let exp = iso_exponent(currency);
+    if exp == 0 {
+        return amount_minor.to_string();
+    }
+    let scale = 10i64.pow(exp);
+    let sign = if amount_minor < 0 { "-" } else { "" };
+    let n = amount_minor.unsigned_abs();
+    let major = n / scale as u64;
+    let frac = n % scale as u64;
+    format!("{sign}{major}.{frac:0width$}", width = exp as usize)
+}
+
+/// The integer major unit (truncating), for the rare PSP that wants it.
+fn amount_major(amount_minor: i64, currency: &str) -> i64 {
+    amount_minor / 10i64.pow(iso_exponent(currency))
+}
+
 /// Substitute `{placeholders}` in a field template.
 fn render(template: &str, vars: &Vars<'_>) -> String {
     template
         .replace("{order_id}", &vars.order_id.to_string())
         .replace("{amount_minor}", &vars.amount_minor.to_string())
+        .replace(
+            "{amount_decimal}",
+            &amount_decimal(vars.amount_minor, vars.currency),
+        )
+        .replace(
+            "{amount_major}",
+            &amount_major(vars.amount_minor, vars.currency).to_string(),
+        )
         .replace("{currency}", vars.currency)
         .replace("{currency_lower}", &vars.currency.to_lowercase())
         .replace("{currency_upper}", &vars.currency.to_uppercase())
@@ -484,15 +544,17 @@ fn form_body(fields: &BTreeMap<String, String>, vars: &Vars<'_>) -> Vec<(String,
         .collect()
 }
 
-/// Dotted keys nest. A value that is exactly `{amount_minor}` becomes a
-/// JSON number — the one case where providers reliably reject a string.
+/// Dotted keys nest. A value that is exactly `{amount_minor}` or
+/// `{amount_major}` becomes a JSON number (providers reject a string
+/// there); `{amount_decimal}` stays a string, which is what the gateways
+/// that use it want (`"value": "10.00"`).
 fn json_body(fields: &BTreeMap<String, String>, vars: &Vars<'_>) -> Value {
     let mut root = json!({});
     for (key, template) in fields {
-        let value = if template.trim() == "{amount_minor}" {
-            json!(vars.amount_minor)
-        } else {
-            json!(render(template, vars))
+        let value = match template.trim() {
+            "{amount_minor}" => json!(vars.amount_minor),
+            "{amount_major}" => json!(amount_major(vars.amount_minor, vars.currency)),
+            _ => json!(render(template, vars)),
         };
         let mut cursor = &mut root;
         let parts: Vec<&str> = key.split('.').collect();
@@ -557,22 +619,23 @@ fn verify_signature(
         }
     }
 
-    let signed = webhook
-        .signed_payload
-        .replace("{timestamp}", &timestamp.unwrap_or_default().to_string())
-        .replace("{body}", &String::from_utf8_lossy(body));
+    // Build the signed payload as BYTES: the raw body is HMAC'd exactly as
+    // received. Going through a lossy String would mangle any non-UTF-8
+    // byte and break verification — providers sign the wire bytes, not a
+    // re-encoding of them.
+    let signed = signed_payload_bytes(&webhook.signed_payload, timestamp.unwrap_or_default(), body);
 
     let expected = match webhook.digest {
         Digest::Sha256 => {
             let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
                 .map_err(|_| PaymentError::BadSignature)?;
-            mac.update(signed.as_bytes());
+            mac.update(&signed);
             mac.finalize().into_bytes().to_vec()
         }
         Digest::Sha512 => {
             let mut mac = Hmac::<Sha512>::new_from_slice(secret.as_bytes())
                 .map_err(|_| PaymentError::BadSignature)?;
-            mac.update(signed.as_bytes());
+            mac.update(&signed);
             mac.finalize().into_bytes().to_vec()
         }
     };
@@ -592,6 +655,23 @@ fn verify_signature(
     } else {
         Err(PaymentError::BadSignature)
     }
+}
+
+/// Render the signed-payload template to bytes: `{timestamp}` (digits,
+/// safe as text) is substituted, and every `{body}` is spliced in as the
+/// raw request bytes.
+fn signed_payload_bytes(template: &str, timestamp: i64, body: &[u8]) -> Vec<u8> {
+    let templated = template.replace("{timestamp}", &timestamp.to_string());
+    let mut out = Vec::with_capacity(templated.len() + body.len());
+    let mut rest = templated.as_bytes();
+    let marker = b"{body}";
+    while let Some(idx) = rest.windows(marker.len()).position(|w| w == marker) {
+        out.extend_from_slice(&rest[..idx]);
+        out.extend_from_slice(body);
+        rest = &rest[idx + marker.len()..];
+    }
+    out.extend_from_slice(rest);
+    out
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -694,4 +774,72 @@ pub mod preset {
     "failed_events": ["payment_intent.payment_failed", "payment_intent.canceled"]
   }
 }"#;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exponents_cover_the_iso_exceptions() {
+        assert_eq!(iso_exponent("PHP"), 2);
+        assert_eq!(iso_exponent("usd"), 2); // case-insensitive
+        assert_eq!(iso_exponent("JPY"), 0);
+        assert_eq!(iso_exponent("KRW"), 0);
+        assert_eq!(iso_exponent("BHD"), 3);
+        assert_eq!(iso_exponent("ZZZ"), 2); // unknown → the common default
+    }
+
+    /// The whole point of Finding 1: an amount is formatted for the
+    /// currency's real decimal places, so a decimal-wanting PSP charges
+    /// the right number.
+    #[test]
+    fn amount_decimal_respects_currency_exponent() {
+        assert_eq!(amount_decimal(45000, "PHP"), "450.00");
+        assert_eq!(amount_decimal(45067, "PHP"), "450.67");
+        assert_eq!(amount_decimal(4507, "PHP"), "45.07"); // fraction zero-padded
+        // Zero-decimal: NOT "50.00" — ¥5000 is five thousand yen.
+        assert_eq!(amount_decimal(5000, "JPY"), "5000");
+        // Three-decimal.
+        assert_eq!(amount_decimal(5000, "BHD"), "5.000");
+        assert_eq!(amount_decimal(5123, "BHD"), "5.123");
+    }
+
+    #[test]
+    fn amount_major_truncates_to_the_major_unit() {
+        assert_eq!(amount_major(45099, "PHP"), 450);
+        assert_eq!(amount_major(5000, "JPY"), 5000);
+        assert_eq!(amount_major(5999, "BHD"), 5);
+    }
+
+    /// Stripe's preset uses {amount_minor}, which must stay the raw integer
+    /// — Stripe's own convention IS ISO minor units, so no conversion.
+    #[test]
+    fn stripe_amount_is_the_untouched_minor_integer() {
+        let vars = Vars {
+            order_id: uuid::Uuid::nil(),
+            amount_minor: 5000,
+            currency: "JPY",
+            payment_intent_id: "",
+            idempotency_key: String::new(),
+        };
+        let mut fields = BTreeMap::new();
+        fields.insert("amount".to_string(), "{amount_minor}".to_string());
+        let body = json_body(&fields, &vars);
+        assert_eq!(body["amount"], serde_json::json!(5000)); // number, not "50.00"
+    }
+
+    /// The HMAC input is built over raw bytes, so a body with a non-UTF-8
+    /// byte still verifies (Finding 4). A lossy String would have changed
+    /// the 0xFF into the replacement char and broken the digest.
+    #[test]
+    fn signed_payload_preserves_raw_bytes() {
+        let body = [0x7b, 0xff, 0x7d]; // { <0xFF> }  — not valid UTF-8
+        let signed = signed_payload_bytes("{timestamp}.{body}", 1700000000, &body);
+        assert!(
+            signed.ends_with(&body),
+            "the raw body bytes must survive intact"
+        );
+        assert!(signed.starts_with(b"1700000000."));
+    }
 }

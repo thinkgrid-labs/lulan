@@ -192,6 +192,27 @@ async fn refresh_jwks(
     }
 }
 
+/// Whether a JWT algorithm belongs to the same family as the JWK's key
+/// material. Blocks using a key of one type to verify a token signed with
+/// an algorithm of another (RSA key ↔ HS256, etc.).
+fn alg_family_matches(alg: Algorithm, key: &jwk::AlgorithmParameters) -> bool {
+    use jwk::AlgorithmParameters as P;
+    match key {
+        P::RSA(_) => matches!(
+            alg,
+            Algorithm::RS256
+                | Algorithm::RS384
+                | Algorithm::RS512
+                | Algorithm::PS256
+                | Algorithm::PS384
+                | Algorithm::PS512
+        ),
+        P::EllipticCurve(_) => matches!(alg, Algorithm::ES256 | Algorithm::ES384),
+        P::OctetKeyPair(_) => matches!(alg, Algorithm::EdDSA),
+        P::OctetKey(_) => matches!(alg, Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512),
+    }
+}
+
 impl IdentityProvider for JwksIdentity {
     fn verify(&self, token: &str) -> Option<Subject> {
         let header = jsonwebtoken::decode_header(token).ok()?;
@@ -205,7 +226,14 @@ impl IdentityProvider for JwksIdentity {
             // attacks start.
             let algorithm = match &jwk.common.key_algorithm {
                 Some(alg) => alg.to_string().parse().ok()?,
-                None => header.alg,
+                // A JWK MAY omit `alg` (spec-legal), so this path is
+                // reachable. Only accept the header's alg if its family
+                // matches the key material — an RSA public key must not be
+                // used to "verify" an HS256 token (classic alg-confusion).
+                // Without this the safety rests on jsonwebtoken's internal
+                // type check; make it our own invariant instead.
+                None if alg_family_matches(header.alg, &jwk.algorithm) => header.alg,
+                None => return None,
             };
             (DecodingKey::from_jwk(jwk).ok()?, algorithm)
         };
