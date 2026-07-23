@@ -15,3 +15,5 @@ dist/
 # Internal docs stay local; the benchmarks doc is public (cited in README)
 docs/*
 !docs/benchmarks.md
+!docs/launch/
+!docs/launch/**

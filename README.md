@@ -84,6 +84,8 @@ just up      # PostgreSQL 16 + Redis 7 (Docker)
 just serve   # migrate, seed a sample multi-stop network, serve on :8080
 ```
 
+> **Full executed walkthrough:** [QUICKSTART.md](QUICKSTART.md) runs every step below against a fresh instance with real output, ending in a boarding pass verified with the server switched off. Interactive API reference: `GET /docs` (Scalar over the committed spec).
+
 Book a ticket end to end:
 
 ```bash
@@ -138,6 +140,7 @@ just loadgen-paced 200 30  # open-loop 200 req/s — honest seat-lock latencies
 | `POST /v1/scans` | Batched, idempotent boarding-scan sync (validator key) |
 | `GET /v1/customers/me/orders` | Authenticated customer's bookings (IdP JWT) |
 | `POST /v1/webhooks` | Register HMAC-signed webhook endpoints (admin key) |
+| `GET /docs` | Interactive API reference (Scalar) |
 | `GET /metrics` | Prometheus metrics |
 
 The full surface is documented in the OpenAPI spec — committed at [`crates/lulan-api/openapi.json`](crates/lulan-api/openapi.json) and served live at `GET /openapi.json`. A typed TypeScript client ships as [`@lulan/storefront-sdk`](packages/storefront-sdk).

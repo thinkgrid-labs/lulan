@@ -42,6 +42,24 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 /// the actual router.
 pub const OPENAPI_JSON: &str = include_str!("../openapi.json");
 
+/// The `/docs` playground: Scalar rendering the committed spec. Kept as a
+/// tiny static page (Scalar loads from a CDN) so it adds no build step and
+/// no dependency to the server. Operators who forbid third-party scripts
+/// can point their own reference tool at `/openapi.json` instead.
+const DOCS_HTML: &str = r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lulan API reference</title>
+  </head>
+  <body>
+    <script id="api-reference" data-url="/openapi.json"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+  </body>
+</html>
+"#;
+
 pub fn router(state: AppState) -> Router {
     let router = Router::new()
         .route("/health/live", get(health::live))
@@ -125,6 +143,18 @@ pub fn router(state: AppState) -> Router {
                 (
                     [(axum::http::header::CONTENT_TYPE, "application/json")],
                     OPENAPI_JSON,
+                )
+            }),
+        )
+        // A read-and-try API reference over the committed spec — the
+        // "docs-first" launch surface. Scalar renders /openapi.json; a
+        // developer evaluates the whole API without cloning.
+        .route(
+            "/docs",
+            get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    DOCS_HTML,
                 )
             }),
         )
@@ -231,6 +261,26 @@ mod tests {
                     "{method} {path} documented with wrong method"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn docs_playground_and_spec_serve_without_a_database() {
+        let app = router(AppState::new(None, None).await);
+        for (path, needle) in [("/openapi.json", "openapi"), ("/docs", "/openapi.json")] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains(needle),
+                "{path} must reference {needle}"
+            );
         }
     }
 
