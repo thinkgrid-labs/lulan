@@ -19,6 +19,14 @@ use uuid::Uuid;
 /// gated on an integration-or-admin key. Bootstrapped per run.
 const API_KEY: &str = "llk_test_claims_it_key";
 
+/// Serialises the two tests in this binary. `hold_flow` mutates the
+/// process environment (LULAN_HOLD_MAX_TRIP_FRACTION) while
+/// `concurrent_claims` reads it in `AppState::new`; concurrent env
+/// read/write is undefined behaviour, so they must not overlap. An
+/// async-aware mutex, since the guard is held across the whole test.
+static SERIAL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// Each test gets its own trip (`offset` from the latest) so parallel tests
 /// in this binary never reset each other's fixture. Trips are taken from
 /// the END of the schedule so the availability test's first-trip fixture
@@ -101,6 +109,7 @@ async fn post_json_as(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_claims_never_double_sell() {
+    let _serial = SERIAL.lock().await;
     let Some((pool, trip_id)) = setup(0).await else {
         return;
     };
@@ -250,6 +259,7 @@ async fn concurrent_claims_never_double_sell() {
 
 #[tokio::test]
 async fn hold_flow_protects_spans_and_feeds_claims() {
+    let _serial = SERIAL.lock().await;
     let Some((pool, trip_id)) = setup(1).await else {
         return;
     };

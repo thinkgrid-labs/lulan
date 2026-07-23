@@ -1,0 +1,4 @@
+# wasm-pack build output — reproduce with `npm run build` / `build:node`.
+pkg/
+pkg-node/
+node_modules/

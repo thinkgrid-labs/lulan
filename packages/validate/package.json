@@ -1,0 +1,29 @@
+{
+  "name": "@lulan/validate",
+  "version": "0.1.0",
+  "description": "Offline Lulan ticket verification — verify Ed25519-signed QR boarding passes in the browser, React Native, or Node with no server call.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thinkgrid-labs/lulan.git",
+    "directory": "packages/validate"
+  },
+  "keywords": ["lulan", "ticket", "boarding-pass", "offline", "ed25519", "wasm", "qr"],
+  "main": "pkg/lulan_validate.js",
+  "module": "pkg/lulan_validate.js",
+  "types": "types.d.ts",
+  "files": ["pkg/lulan_validate.js", "pkg/lulan_validate_bg.wasm", "types.d.ts"],
+  "exports": {
+    ".": {
+      "types": "./types.d.ts",
+      "default": "./pkg/lulan_validate.js"
+    }
+  },
+  "scripts": {
+    "build": "wasm-pack build ../../crates/lulan-validate-wasm --release --target web --out-dir ../../packages/validate/pkg --out-name lulan_validate",
+    "build:node": "wasm-pack build ../../crates/lulan-validate-wasm --release --target nodejs --out-dir ../../packages/validate/pkg-node --out-name lulan_validate",
+    "test": "npm run build:node && node test/verify.test.mjs",
+    "prepack": "npm run build"
+  }
+}

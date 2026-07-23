@@ -32,7 +32,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+pub use uuid::Uuid;
 
 /// A cached public key, as served by `GET /v1/ticket-keys`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

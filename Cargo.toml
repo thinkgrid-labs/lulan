@@ -5,6 +5,16 @@ members = [
     "crates/lulan-pricing",
     "crates/lulan-pricing-guest",
     "crates/lulan-validate",
+    "crates/lulan-validate-wasm",
+    "crates/lulan-api",
+    "crates/lulan-loadgen",
+]
+# The wasm wrapper is built by wasm-pack, not `cargo test --workspace`.
+default-members = [
+    "crates/lulan-engine",
+    "crates/lulan-pricing",
+    "crates/lulan-pricing-guest",
+    "crates/lulan-validate",
     "crates/lulan-api",
     "crates/lulan-loadgen",
 ]

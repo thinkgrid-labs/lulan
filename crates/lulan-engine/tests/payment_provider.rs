@@ -81,12 +81,29 @@ fn stripe_against(addr: SocketAddr) -> ProviderConfig {
     config
 }
 
+/// Cargo runs these test functions on parallel threads, so a per-test
+/// `set_var` is concurrent environment mutation — undefined behaviour in
+/// edition 2024, which is why the call is `unsafe`. Every secret this
+/// binary needs is a fixed constant, so we set them all EXACTLY ONCE,
+/// synchronized. After the `Once` completes no test ever writes the
+/// environment again; concurrent reads are fine.
+fn install_test_env() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: `Once` guarantees this body runs on one thread with a
+        // happens-before edge to every caller, and nothing writes the
+        // environment after it.
+        unsafe {
+            std::env::set_var("LULAN_PAYMENT_SECRET", "sk_test_stub");
+            std::env::set_var("LULAN_PAYMENT_WEBHOOK_SECRET", "whsec_stub");
+            std::env::set_var("ACME_KEY", "acme-secret");
+            std::env::set_var("ACME_WEBHOOK_SECRET", "acme-hook");
+        }
+    });
+}
+
 fn with_secrets<T>(body: impl FnOnce() -> T) -> T {
-    // SAFETY: single-threaded setup before the provider reads them.
-    unsafe {
-        std::env::set_var("LULAN_PAYMENT_SECRET", "sk_test_stub");
-        std::env::set_var("LULAN_PAYMENT_WEBHOOK_SECRET", "whsec_stub");
-    }
+    install_test_env();
     body()
 }
 
@@ -303,10 +320,7 @@ async fn an_arbitrary_provider_needs_no_rust() {
     ))
     .expect("config parses");
 
-    unsafe {
-        std::env::set_var("ACME_KEY", "acme-secret");
-        std::env::set_var("ACME_WEBHOOK_SECRET", "acme-hook");
-    }
+    install_test_env();
     let provider = HttpProvider::new(config).unwrap();
     assert_eq!(provider.name(), "acme-pay");
 

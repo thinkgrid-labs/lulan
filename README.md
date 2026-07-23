@@ -363,7 +363,7 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] Open-loop benchmark mode (published seat-lock latencies vs the <20 ms target)
 - [x] Admin operations API: staff RBAC (IdP-backed), network & schedule management, fare publishing with rollback, manifests, refunds — with `@lulan/admin-sdk`
 - [ ] Reference Next.js storefront + React Native boarding-crew app
-- [ ] `@lulan/validate` npm package (WASM build of the validator)
+- [x] `@lulan/validate` npm package — the validator compiled to WASM (browser / React Native / Node), tested against real engine vectors
 - [ ] Reservation Sync Connectors — first-class orchestrated mode (PSS / manifest / dispatch sync, external-ref mapping)
 
 ## Use cases
