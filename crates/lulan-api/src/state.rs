@@ -44,9 +44,7 @@ impl AppState {
         {
             tracing::error!(error = %err, "ticket signing key unavailable");
         }
-        let identity: Option<Arc<dyn crate::identity::IdentityProvider>> =
-            crate::identity::HsJwtIdentity::from_env()
-                .map(|provider| Arc::new(provider) as Arc<dyn crate::identity::IdentityProvider>);
+        let identity = crate::identity::provider_from_env().await;
         Self {
             db,
             redis,

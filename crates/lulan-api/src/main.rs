@@ -14,12 +14,8 @@ use sqlx::postgres::PgPoolOptions;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lulan_api=info,lulan_engine=info,tower_http=info".into()),
-        )
-        .init();
+    // Held to the end of main so buffered spans are flushed on shutdown.
+    let _telemetry = lulan_api::telemetry::init();
 
     let config = Config::from_env();
 
@@ -246,18 +242,11 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(kid = %signer.kid, "ticket signing key active");
     }
 
-    // Customer identity port: HS256 JWT adapter when configured.
-    let identity: Option<std::sync::Arc<dyn lulan_api::identity::IdentityProvider>> =
-        match lulan_api::identity::HsJwtIdentity::from_env() {
-            Some(provider) => {
-                tracing::info!("identity: HS256 JWT provider configured");
-                Some(std::sync::Arc::new(provider))
-            }
-            None => {
-                tracing::info!("identity: no IdP configured — guest checkout only");
-                None
-            }
-        };
+    // Customer identity port: JWKS when configured, else HS256.
+    let identity = lulan_api::identity::provider_from_env().await;
+    if identity.is_none() {
+        tracing::info!("identity: no IdP configured — guest checkout only");
+    }
 
     let app = router(AppState {
         db,
@@ -270,9 +259,15 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!(addr = %config.listen_addr, "lulan-api listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // into_make_service_with_connect_info is what puts the peer address
+    // in scope for the rate limiter; without it the limiter cannot tell
+    // callers apart except by credential.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

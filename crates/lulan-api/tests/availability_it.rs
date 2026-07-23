@@ -83,6 +83,21 @@ async fn availability_answers_the_prd_example_over_http() {
 
     let app = lulan_api::router(AppState::new(Some(pool.clone()), None).await);
 
+    // Search fills availability for the whole page in two set-based
+    // queries instead of two per trip. Cross-check the batched numbers
+    // against the single-trip endpoint, which computes them the other
+    // way, and confirm the page cap is honoured.
+    let (_, page) = get_json(
+        &app,
+        &format!("/v1/trips/search?origin=BTG&destination=CEB&departure_date={date}&limit=1"),
+    )
+    .await;
+    assert_eq!(
+        page["legs"][0]["trips"].as_array().unwrap().len(),
+        1,
+        "limit must bound the page"
+    );
+
     // Search: full-journey availability must see 12A as unavailable and the
     // fare summary must count seats for the exact requested span.
     let (status, body) = get_json(
@@ -104,6 +119,47 @@ async fn availability_answers_the_prd_example_over_http() {
     assert_eq!(hit["trip_id"].as_str().unwrap(), trip_id);
     assert_eq!(hit["from_index"], 0);
     assert_eq!(hit["to_index"], 3);
+
+    // Same span, computed per-trip by the availability endpoint: the two
+    // paths must agree, or the batched join is silently wrong.
+    let (_, per_trip) = get_json(
+        &app,
+        &format!("/v1/trips/{trip_id}/availability?origin=BTG&destination=CEB"),
+    )
+    .await;
+    let seats = per_trip["seats"].as_array().unwrap();
+    for fare in hit["seats"].as_array().unwrap() {
+        let class = fare["fare_class"].as_str().unwrap();
+        let expected_total = seats.iter().filter(|s| s["fare_class"] == class).count();
+        let expected_free = seats
+            .iter()
+            .filter(|s| s["fare_class"] == class && s["available"] == true)
+            .count();
+        assert_eq!(
+            fare["total"].as_u64().unwrap() as usize,
+            expected_total,
+            "batched total disagrees for {class}"
+        );
+        assert_eq!(
+            fare["available"].as_u64().unwrap() as usize,
+            expected_free,
+            "batched availability disagrees for {class}"
+        );
+    }
+    for pool_line in hit["pools"].as_array().unwrap() {
+        let code = pool_line["code"].as_str().unwrap();
+        let expected = per_trip["pools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["code"] == code)
+            .expect("same pools both ways")["remaining"]
+            .clone();
+        assert_eq!(
+            pool_line["remaining"], expected,
+            "batched pool remainder disagrees for {code}"
+        );
+    }
     let economy = hit["seats"]
         .as_array()
         .unwrap()

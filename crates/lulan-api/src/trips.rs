@@ -30,7 +30,14 @@ pub struct SearchParams {
     return_date: Option<NaiveDate>,
     #[serde(default = "default_trip_type")]
     trip_type: TripType,
+    /// Departures per leg. Bounded so one query cannot be made arbitrarily
+    /// expensive on an endpoint that needs no credential.
+    #[serde(default)]
+    limit: Option<i64>,
 }
+
+const DEFAULT_SEARCH_LIMIT: i64 = 50;
+const MAX_SEARCH_LIMIT: i64 = 200;
 
 /// One leg of the search: a direction + date and its candidate trips.
 #[derive(Serialize)]
@@ -76,6 +83,11 @@ pub async fn search(
         _ => {}
     }
 
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_SEARCH_LIMIT)
+        .clamp(1, MAX_SEARCH_LIMIT);
+
     let store = state.inventory()?;
     let mut legs = vec![SearchLeg {
         leg: "outbound",
@@ -83,7 +95,12 @@ pub async fn search(
         destination: params.destination.clone(),
         date: params.departure_date,
         trips: store
-            .search_trips(&params.origin, &params.destination, params.departure_date)
+            .search_trips(
+                &params.origin,
+                &params.destination,
+                params.departure_date,
+                limit,
+            )
             .await?,
     }];
 
@@ -94,7 +111,7 @@ pub async fn search(
             destination: params.origin.clone(),
             date: return_date,
             trips: store
-                .search_trips(&params.destination, &params.origin, return_date)
+                .search_trips(&params.destination, &params.origin, return_date, limit)
                 .await?,
         });
     }

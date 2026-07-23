@@ -390,6 +390,7 @@ impl InventoryStore {
         origin: &str,
         destination: &str,
         date: NaiveDate,
+        limit: i64,
     ) -> Result<Vec<TripSummary>, StoreError> {
         let rows = sqlx::query(
             r#"
@@ -410,15 +411,21 @@ impl InventoryStore {
               AND t.service_date = $3
               AND t.status = 'scheduled'
             ORDER BY t.departs_at
+            LIMIT $4
             "#,
         )
         .bind(origin)
         .bind(destination)
         .bind(date)
+        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
 
         let mut trips = Vec::with_capacity(rows.len());
+        // (trip, mask) for the batched availability queries below. Spans
+        // differ per trip: two departures serving the same city pair can
+        // run different routes, so the stop indices are not shared.
+        let mut spans: Vec<(Uuid, i64)> = Vec::with_capacity(rows.len());
         for row in rows {
             let trip_id: Uuid = row.try_get("id")?;
             let from_index: i16 = row.try_get("from_index")?;
@@ -467,11 +474,105 @@ impl InventoryStore {
                 duration_minutes,
                 from_index: span.from_index(),
                 to_index: span.to_index(),
-                seats: self.fare_availability(trip_id, span).await?,
-                pools: self.pool_availability(trip_id, span).await?,
+                seats: Vec::new(),
+                pools: Vec::new(),
             });
+            spans.push((trip_id, span.mask() as i64));
+        }
+
+        // Two set-based queries for the whole page, rather than two per
+        // trip. Search is unauthenticated and the most database-expensive
+        // endpoint in the API; 2N+1 queries on it was the DoS surface.
+        let mut seats = self.fare_availability_batch(&spans).await?;
+        let mut pools = self.pool_availability_batch(&spans).await?;
+        for trip in &mut trips {
+            trip.seats = seats.remove(&trip.trip_id).unwrap_or_default();
+            trip.pools = pools.remove(&trip.trip_id).unwrap_or_default();
         }
         Ok(trips)
+    }
+
+    /// Fare-class availability for many (trip, span) pairs at once.
+    async fn fare_availability_batch(
+        &self,
+        spans: &[(Uuid, i64)],
+    ) -> Result<std::collections::HashMap<Uuid, Vec<FareAvailability>>, StoreError> {
+        let (trip_ids, masks): (Vec<Uuid>, Vec<i64>) = spans.iter().copied().unzip();
+        let rows = sqlx::query(
+            r#"
+            SELECT q.trip_id, cu.fare_class,
+                   count(*) FILTER (WHERE (so.occupied_mask & q.mask) = 0) AS available,
+                   count(*) AS total
+            FROM unnest($1::uuid[], $2::bigint[]) AS q(trip_id, mask)
+            JOIN seat_occupancy so ON so.trip_id = q.trip_id
+            JOIN capacity_units cu ON cu.id = so.unit_id
+            GROUP BY q.trip_id, cu.fare_class
+            ORDER BY q.trip_id, cu.fare_class
+            "#,
+        )
+        .bind(&trip_ids)
+        .bind(&masks)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out: std::collections::HashMap<Uuid, Vec<FareAvailability>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            out.entry(row.try_get("trip_id")?)
+                .or_default()
+                .push(FareAvailability {
+                    fare_class: row.try_get("fare_class")?,
+                    available: row.try_get("available")?,
+                    total: row.try_get("total")?,
+                });
+        }
+        Ok(out)
+    }
+
+    /// Pool remainders for many (trip, span) pairs at once.
+    async fn pool_availability_batch(
+        &self,
+        spans: &[(Uuid, i64)],
+    ) -> Result<std::collections::HashMap<Uuid, Vec<PoolAvailability>>, StoreError> {
+        // The mask's set bits ARE the segments, so from/to come back out
+        // of it — keeping one shape for both batch queries.
+        let mut trip_ids = Vec::with_capacity(spans.len());
+        let mut froms = Vec::with_capacity(spans.len());
+        let mut tos = Vec::with_capacity(spans.len());
+        for (trip_id, mask) in spans {
+            let mask = *mask as u64;
+            trip_ids.push(*trip_id);
+            froms.push(mask.trailing_zeros() as i32 + 1);
+            tos.push((u64::BITS - mask.leading_zeros()) as i32);
+        }
+
+        let rows = sqlx::query(
+            r#"
+            SELECT q.trip_id, cu.code,
+                   (SELECT min(x) FROM unnest(po.remaining[q.from_idx:q.to_idx]) AS x) AS remaining
+            FROM unnest($1::uuid[], $2::int[], $3::int[]) AS q(trip_id, from_idx, to_idx)
+            JOIN pool_occupancy po ON po.trip_id = q.trip_id
+            JOIN capacity_units cu ON cu.id = po.unit_id
+            ORDER BY q.trip_id, cu.code
+            "#,
+        )
+        .bind(&trip_ids)
+        .bind(&froms)
+        .bind(&tos)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out: std::collections::HashMap<Uuid, Vec<PoolAvailability>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            out.entry(row.try_get("trip_id")?)
+                .or_default()
+                .push(PoolAvailability {
+                    code: row.try_get("code")?,
+                    remaining: row.try_get::<Option<i32>, _>("remaining")?.unwrap_or(0),
+                });
+        }
+        Ok(out)
     }
 
     /// Per-unit availability for one trip and an origin/destination pair on
@@ -571,39 +672,6 @@ impl InventoryStore {
             })
             .collect::<Result<_, sqlx::Error>>()?;
         pick_span(&stops, origin, destination)
-    }
-
-    async fn fare_availability(
-        &self,
-        trip_id: Uuid,
-        span: SegmentSpan,
-    ) -> Result<Vec<FareAvailability>, StoreError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT cu.fare_class,
-                   count(*) FILTER (WHERE (so.occupied_mask & $2) = 0) AS available,
-                   count(*) AS total
-            FROM seat_occupancy so
-            JOIN capacity_units cu ON cu.id = so.unit_id
-            WHERE so.trip_id = $1
-            GROUP BY cu.fare_class
-            ORDER BY cu.fare_class
-            "#,
-        )
-        .bind(trip_id)
-        .bind(span.mask() as i64)
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                Ok(FareAvailability {
-                    fare_class: row.try_get("fare_class")?,
-                    available: row.try_get("available")?,
-                    total: row.try_get("total")?,
-                })
-            })
-            .collect()
     }
 
     async fn pool_availability(

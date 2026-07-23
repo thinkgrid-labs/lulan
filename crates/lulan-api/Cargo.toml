@@ -19,9 +19,14 @@ lulan-engine = { workspace = true }
 lulan-pricing = { path = "../lulan-pricing" }
 jsonwebtoken = { workspace = true }
 metrics = { workspace = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true }
 sha2 = { workspace = true }
 redis = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
@@ -30,6 +35,15 @@ tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+
+[features]
+# Export spans over OTLP. Off by default; `/metrics` is the v1 baseline.
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
 
 [dev-dependencies]
 base64 = { workspace = true }

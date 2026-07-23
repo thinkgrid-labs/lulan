@@ -50,6 +50,11 @@ services:
       # Optional: customer identity (HS256 JWT from your IdP)
       LULAN_IDP_ISSUER: ${LULAN_IDP_ISSUER:-}
       LULAN_IDP_HS256_SECRET: ${LULAN_IDP_HS256_SECRET:-}
+      # Preferred over the shared secret: with an asymmetric key Lulan can
+      # only verify tokens, never mint them. One adapter covers Auth0,
+      # Clerk, Keycloak, Supabase, Firebase and friends.
+      LULAN_IDP_JWKS_URL: ${LULAN_IDP_JWKS_URL:-}
+      LULAN_IDP_AUDIENCE: ${LULAN_IDP_AUDIENCE:-}
       # Optional: operator pricing module (mount it below)
       LULAN_PRICING_WASM: ${LULAN_PRICING_WASM:-}
       # Payments. A built-in preset name (`stripe`) or a path to a provider
@@ -65,6 +70,13 @@ services:
       LULAN_CORS_ALLOWED_ORIGINS: ${LULAN_CORS_ALLOWED_ORIGINS:-}
       # Tuning
       LULAN_RATE_LIMIT: ${LULAN_RATE_LIMIT:-300}
+      # Reads get their own bucket so seat-map polling cannot exhaust the
+      # budget a customer needs to actually book.
+      LULAN_RATE_LIMIT_READS: ${LULAN_RATE_LIMIT_READS:-1200}
+      # Caddy sits in front of this service, so exactly one proxy hop is
+      # trusted in X-Forwarded-For. Anything a client prepends is ignored.
+      LULAN_TRUSTED_PROXY_HOPS: ${LULAN_TRUSTED_PROXY_HOPS:-1}
+      LULAN_REQUEST_TIMEOUT_SECS: ${LULAN_REQUEST_TIMEOUT_SECS:-30}
       LULAN_HOLD_DEFAULT_TTL_SECS: ${LULAN_HOLD_DEFAULT_TTL_SECS:-600}
       LULAN_HOLD_MAX_TTL_SECS: ${LULAN_HOLD_MAX_TTL_SECS:-1800}
       # Stampede control: fraction of a trip's seats that may be held

@@ -20,6 +20,7 @@ pub mod reservations;
 pub mod seed;
 pub mod staff;
 pub mod state;
+pub mod telemetry;
 pub mod tickets;
 pub mod trips;
 pub mod webhooks_admin;
@@ -28,6 +29,7 @@ use axum::{
     Router,
     routing::{delete, get, post},
 };
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use state::AppState;
@@ -140,7 +142,26 @@ pub fn router(state: AppState) -> Router {
         None => router,
     };
 
-    router.layer(TraceLayer::new_for_http()).with_state(state)
+    // Outermost after tracing: a request that never finishes otherwise
+    // holds a connection and a database handle indefinitely. 408 is the
+    // honest answer.
+    router
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(request_timeout_secs()),
+        ))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+/// `LULAN_REQUEST_TIMEOUT_SECS`. Generous by default — a large itinerary
+/// prices several legs — but bounded.
+fn request_timeout_secs() -> u64 {
+    std::env::var("LULAN_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(30)
 }
 
 #[cfg(test)]

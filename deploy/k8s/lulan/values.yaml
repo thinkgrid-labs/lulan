@@ -31,6 +31,11 @@ existingSecret: ""   # takes precedence over the values above
 env:
   RUST_LOG: lulan_api=info,lulan_engine=info
   LULAN_RATE_LIMIT: "300"
+  LULAN_RATE_LIMIT_READS: "1200"
+  # Trusted X-Forwarded-For hops. 0 ignores the header entirely; set it to
+  # the number of proxies actually in front (ingress = 1, ingress+LB = 2).
+  LULAN_TRUSTED_PROXY_HOPS: "1"
+  LULAN_REQUEST_TIMEOUT_SECS: "30"
   LULAN_HOLD_DEFAULT_TTL_SECS: "600"
   LULAN_HOLD_MAX_TTL_SECS: "1800"
   # Fraction of a trip's seats holdable at once ("1" disables).

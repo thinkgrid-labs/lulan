@@ -3,10 +3,16 @@
 //! storefront's IdP issues tokens, Lulan validates them and keeps only a
 //! `(issuer, subject)` reference per customer.
 //!
-//! Shipped adapter: HS256 JWT with a shared secret (`LULAN_IDP_ISSUER` +
-//! `LULAN_IDP_HS256_SECRET`) — enough for first-party storefronts and for
-//! tests. An RS256/JWKS adapter (Auth0, Clerk, Keycloak, Supabase) slots
-//! in behind the same trait.
+//! Two adapters ship:
+//!
+//! - **JWKS** (`LULAN_IDP_ISSUER` + `LULAN_IDP_JWKS_URL`) — one adapter
+//!   covers Auth0, Clerk, Keycloak, Supabase, Firebase, Entra and anything
+//!   else that publishes a JWK Set, which is nearly every hosted IdP.
+//! - **HS256 shared secret** (`LULAN_IDP_ISSUER` + `LULAN_IDP_HS256_SECRET`)
+//!   — enough for a first-party storefront and for tests.
+//!
+//! JWKS is preferred when both are configured: asymmetric keys mean Lulan
+//! never holds anything that could mint a token, only verify one.
 //!
 //! Guest checkout stays first-class: unauthenticated orders carry a
 //! `guest_contact` and get an HMAC retrieval token (same pattern as quote
@@ -18,7 +24,9 @@ use axum::http::request::Parts;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use std::sync::{Arc, RwLock};
+
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, jwk};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sqlx::{PgPool, Row};
@@ -83,6 +91,155 @@ impl IdentityProvider for HsJwtIdentity {
             email: data.claims.email,
         })
     }
+}
+
+/// JWKS-backed verification (RS256/RS384/RS512, ES256/ES384).
+///
+/// Keys are refreshed by a background task rather than fetched during
+/// verification: an HTTP call on the authentication path would put a
+/// third party's availability in front of every booking, and a slow IdP
+/// would become a slow checkout. A token whose `kid` is not in the cached
+/// set is rejected; the next refresh picks up newly published keys.
+pub struct JwksIdentity {
+    issuer: String,
+    audience: Option<String>,
+    keys: Arc<RwLock<jwk::JwkSet>>,
+}
+
+impl JwksIdentity {
+    /// From `LULAN_IDP_ISSUER` + `LULAN_IDP_JWKS_URL`, if both are set.
+    /// Optional `LULAN_IDP_AUDIENCE` pins the `aud` claim.
+    ///
+    /// Fetches once before returning so a misconfigured URL fails at boot
+    /// rather than at a customer's first sign-in, then keeps a refresher
+    /// running for the process lifetime.
+    pub async fn from_env() -> Option<Result<Self, String>> {
+        let issuer = std::env::var("LULAN_IDP_ISSUER").ok()?;
+        let url = std::env::var("LULAN_IDP_JWKS_URL").ok()?;
+        Some(Self::connect(issuer, url, std::env::var("LULAN_IDP_AUDIENCE").ok()).await)
+    }
+
+    pub async fn connect(
+        issuer: String,
+        jwks_url: String,
+        audience: Option<String>,
+    ) -> Result<Self, String> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let initial = fetch_jwks(&client, &jwks_url)
+            .await
+            .map_err(|e| format!("could not fetch {jwks_url}: {e}"))?;
+        if initial.keys.is_empty() {
+            return Err(format!("{jwks_url} published an empty key set"));
+        }
+        tracing::info!(keys = initial.keys.len(), %jwks_url, "identity: JWKS loaded");
+
+        let keys = Arc::new(RwLock::new(initial));
+        let refresh_secs = std::env::var("LULAN_IDP_JWKS_REFRESH_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        tokio::spawn(refresh_jwks(
+            client,
+            jwks_url,
+            keys.clone(),
+            std::time::Duration::from_secs(refresh_secs),
+        ));
+
+        Ok(Self {
+            issuer,
+            audience,
+            keys,
+        })
+    }
+}
+
+async fn fetch_jwks(client: &reqwest::Client, url: &str) -> Result<jwk::JwkSet, String> {
+    client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json::<jwk::JwkSet>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Keeps the cached set current. A failed refresh keeps the previous keys
+/// — an IdP blip must not log every customer out.
+async fn refresh_jwks(
+    client: reqwest::Client,
+    url: String,
+    keys: Arc<RwLock<jwk::JwkSet>>,
+    interval: std::time::Duration,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await; // the initial fetch already happened
+    loop {
+        ticker.tick().await;
+        match fetch_jwks(&client, &url).await {
+            Ok(set) if !set.keys.is_empty() => *keys.write().unwrap() = set,
+            Ok(_) => tracing::warn!(%url, "JWKS refresh returned no keys; keeping the last set"),
+            Err(err) => {
+                tracing::warn!(%url, error = %err, "JWKS refresh failed; keeping the last set")
+            }
+        }
+    }
+}
+
+impl IdentityProvider for JwksIdentity {
+    fn verify(&self, token: &str) -> Option<Subject> {
+        let header = jsonwebtoken::decode_header(token).ok()?;
+        let kid = header.kid?;
+
+        let (key, algorithm) = {
+            let keys = self.keys.read().ok()?;
+            let jwk = keys.find(&kid)?;
+            // Trust the key's own algorithm, never the token header's:
+            // taking `alg` from the token is how algorithm-confusion
+            // attacks start.
+            let algorithm = match &jwk.common.key_algorithm {
+                Some(alg) => alg.to_string().parse().ok()?,
+                None => header.alg,
+            };
+            (DecodingKey::from_jwk(jwk).ok()?, algorithm)
+        };
+
+        let mut validation = Validation::new(algorithm);
+        validation.set_issuer(&[&self.issuer]);
+        match &self.audience {
+            Some(audience) => validation.set_audience(&[audience]),
+            None => validation.validate_aud = false,
+        }
+        let data = jsonwebtoken::decode::<JwtClaims>(token, &key, &validation).ok()?;
+        Some(Subject {
+            issuer: data.claims.iss,
+            subject: data.claims.sub,
+            email: data.claims.email,
+        })
+    }
+}
+
+/// The configured identity provider, if any. JWKS is preferred: with an
+/// asymmetric key Lulan can only verify tokens, never mint them.
+pub async fn provider_from_env() -> Option<Arc<dyn IdentityProvider>> {
+    match JwksIdentity::from_env().await {
+        Some(Ok(provider)) => return Some(Arc::new(provider)),
+        Some(Err(err)) => {
+            tracing::error!(error = %err, "identity: JWKS configured but unusable");
+            return None;
+        }
+        None => {}
+    }
+    HsJwtIdentity::from_env().map(|provider| {
+        tracing::info!("identity: HS256 shared-secret provider configured");
+        Arc::new(provider) as Arc<dyn IdentityProvider>
+    })
 }
 
 /// Resolve an optional customer identity from `Authorization: Bearer`.

@@ -215,7 +215,7 @@ LULAN_BOOTSTRAP_ADMIN_STAFF='https://auth.example.com|user-id-of-admin'
 | Use case | How it maps |
 |---|---|
 | Ferry line with a Next.js storefront using **Supabase/Firebase auth** | Storefront session JWT goes straight to Lulan as the customer token — bookings attach to the customer, `GET /v1/customers/me/orders` lists them |
-| Bus company on **Auth0 / Clerk / Keycloak** | Same trait, JWKS (RS256) adapter — planned; one adapter covers all JWKS-publishing IdPs |
+| Bus company on **Auth0 / Clerk / Keycloak / Entra** | Set `LULAN_IDP_JWKS_URL` — one JWKS adapter covers every IdP that publishes a JWK Set. Keys refresh in the background, so no IdP call sits on the auth path |
 | Walk-up / kiosk sales, no accounts at all | Skip the IdP entirely: **guest checkout** is first-class — `guest_contact` + an HMAC retrieval token (magic link) per order |
 | Back-office staff signing into the admin app | Same IdP login; an admin enrols their identity via `POST /v1/admin/staff` with a role — every action they take is audited by name |
 
@@ -306,6 +306,23 @@ publishes a ruleset per currency.
 
 </details>
 
+### Abuse control
+
+Search and availability need no credential, so their cost is bounded
+rather than trusted: reads and writes have separate per-caller budgets
+(browsing a seat map cannot exhaust the budget needed to book), search
+pages are capped, and every request has a timeout.
+
+Callers are identified by credential when they have one, otherwise by
+connection address. `X-Forwarded-For` is honoured only as far as
+`LULAN_TRUSTED_PROXY_HOPS` says there are proxies in front, counting from
+the right — a client can prepend anything it likes to that header, but it
+cannot forge the entries its own proxy appends. The default of `0` ignores
+the header entirely; behind Caddy or an ingress, set `1`.
+
+The limiter still fails **open**: if Redis is unavailable, requests pass.
+Abuse control must never become the outage.
+
 ## Benchmarks
 
 Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/benchmarks.md):
@@ -329,9 +346,11 @@ Real numbers, adversarial shapes, published in [`docs/benchmarks.md`](docs/bench
 - [x] Webhooks: HMAC-signed deliveries with durable retries
 - [x] Authentication: API keys + roles, identity-provider port, guest checkout with retrieval tokens
 - [x] Order-scoped authorization — paying, cancelling, reading an order or its tickets each require that order's credential; the id alone is not one
-- [x] Idempotent booking retries — the key is reserved before the write, scoped to the caller and bound to the request body — plus per-caller rate limiting
+- [x] Idempotent booking retries — the key is reserved before the write, scoped to the caller and bound to the request body
+- [x] Abuse control: separate read/write rate-limit budgets, callers identified by connection (not a spoofable header), bounded search pages, request timeouts
+- [x] Identity: JWKS (Auth0 / Clerk / Keycloak / Supabase / Firebase) or HS256 shared secret
 - [x] OpenAPI spec (served at `/openapi.json`) + TypeScript SDK (`@lulan/storefront-sdk`)
-- [x] Prometheus `/metrics` (OTLP traces planned)
+- [x] Prometheus `/metrics`, plus OTLP span export behind `--features otlp`
 - [x] Itineraries: one-way, round-trip & multi-city (one atomic order across legs, round-trip fares)
 - [x] Itinerary holds: one hold across all legs, TTL auto-release, live held-seat map
 - [x] Ancillaries: operator add-on catalog (baggage, meals, insurance) priced into quotes & orders

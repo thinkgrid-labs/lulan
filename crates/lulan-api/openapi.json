@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Lulan API",
-    "description": "Open-source headless reservation engine for transit: segment-aware inventory, race-free booking, itineraries (one-way, round-trip, multi-city), signed quotes, per-passenger Ed25519 QR tickets with offline validation, webhooks, and API-key auth.\n\nAuthentication: storefront endpoints (search, quotes, orders) work unauthenticated with guest checkout (`guest_contact` + retrieval token) or with a customer JWT (`Authorization: Bearer <jwt>`, operator IdP). Server-to-server endpoints take an API key via `X-Api-Key` — roles: `operator_admin` (webhooks/keys), `integration` (read any order, claim capacity directly, capture payment), `validator` (scan sync). `POST /v1/orders` honours an `Idempotency-Key` header: the first 201 for a key is stored and replayed verbatim on retries.\n\nAdmin operations (`/v1/admin/*`) require an enrolled STAFF JWT (roles: admin / ops / support; admin implies all) — or, for staff management only, an operator_admin API key (bootstrap). Every admin mutation is audited with the acting human's staff id.\n\nBrowsers: the API sends no CORS headers unless the operator names allowed origins (LULAN_CORS_ALLOWED_ORIGINS). A storefront calling Lulan directly from the browser needs its origin configured; otherwise route calls through your own backend.\n\nPayments are a port: the running provider is deployment configuration (LULAN_PAYMENT_PROVIDER), described by a JSON file or a built-in preset. Lulan never touches card data and never learns a provider's vocabulary — an adapter normalises callbacks to captured / failed. With no provider configured, the fake provider captures WITHOUT taking money: dev only.",
+    "description": "Open-source headless reservation engine for transit: segment-aware inventory, race-free booking, itineraries (one-way, round-trip, multi-city), signed quotes, per-passenger Ed25519 QR tickets with offline validation, webhooks, and API-key auth.\n\nAuthentication: storefront endpoints (search, quotes, orders) work unauthenticated with guest checkout (`guest_contact` + retrieval token) or with a customer JWT (`Authorization: Bearer <jwt>`) validated against the operator's IdP — JWKS (Auth0, Clerk, Keycloak, Supabase, Firebase, anything publishing a JWK Set) or an HS256 shared secret. Server-to-server endpoints take an API key via `X-Api-Key` — roles: `operator_admin` (webhooks/keys), `integration` (read any order, claim capacity directly, capture payment), `validator` (scan sync). `POST /v1/orders` honours an `Idempotency-Key` header: the first 201 for a key is stored and replayed verbatim on retries.\n\nAdmin operations (`/v1/admin/*`) require an enrolled STAFF JWT (roles: admin / ops / support; admin implies all) — or, for staff management only, an operator_admin API key (bootstrap). Every admin mutation is audited with the acting human's staff id.\n\nBrowsers: the API sends no CORS headers unless the operator names allowed origins (LULAN_CORS_ALLOWED_ORIGINS). A storefront calling Lulan directly from the browser needs its origin configured; otherwise route calls through your own backend.\n\nPayments are a port: the running provider is deployment configuration (LULAN_PAYMENT_PROVIDER), described by a JSON file or a built-in preset. Lulan never touches card data and never learns a provider's vocabulary — an adapter normalises callbacks to captured / failed. With no provider configured, the fake provider captures WITHOUT taking money: dev only.\n\nRate limits apply to reads and writes in separate per-caller buckets, so browsing seat maps cannot exhaust the budget needed to complete a booking. Callers are identified by credential when present, otherwise by connection address; `X-Forwarded-For` is honoured only as far as the operator declares proxies in front (LULAN_TRUSTED_PROXY_HOPS).",
     "version": "0.7.5",
     "license": {
       "name": "Apache-2.0",
@@ -1541,6 +1541,18 @@
               "format": "date"
             },
             "description": "Required for round_trip, forbidden for one_way"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 1,
+              "maximum": 200
+            },
+            "description": "Departures per leg. Clamped to 200 — search needs no credential, so its cost is bounded."
           }
         ],
         "responses": {
@@ -1556,6 +1568,9 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
           }
         },
         "description": "Returns candidate trips per leg (each enriched with operator, service number, vehicle, and schedule). Pick one trip per leg to build a journeys[] quote/order. Multi-city is composed client-side from several one-way searches."
